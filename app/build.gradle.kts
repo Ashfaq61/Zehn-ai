@@ -1,5 +1,6 @@
 plugins {
   alias(libs.plugins.android.application)
+  alias(libs.plugins.kotlin.android)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.kotlin.serialization)
   alias(libs.plugins.google.devtools.ksp)
@@ -9,7 +10,7 @@ plugins {
 
 android {
   namespace = "com.zehn.assistant"
-  compileSdk { version = release(36) { minorApiLevel = 1 } }
+  compileSdk = 35
 
   defaultConfig {
     applicationId = "com.zehn.assistant"
@@ -55,8 +56,11 @@ android {
     }
   }
   compileOptions {
-    sourceCompatibility = JavaVersion.VERSION_11
-    targetCompatibility = JavaVersion.VERSION_11
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+  }
+  kotlinOptions {
+    jvmTarget = "17"
   }
   buildFeatures {
     compose = true
@@ -74,23 +78,6 @@ android {
   }
 }
 
-kotlin {
-  compilerOptions {
-    freeCompilerArgs.add("-Xskip-metadata-version-check")
-  }
-}
-
-configurations.configureEach {
-  resolutionStrategy {
-    force(
-      "org.jetbrains.kotlin:kotlin-stdlib:2.2.10",
-      "org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.2.10",
-      "org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.2.10",
-      "org.jetbrains.kotlin:kotlin-reflect:2.2.10"
-    )
-  }
-}
-
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
@@ -98,7 +85,6 @@ secrets {
 }
 
 dependencies {
-  implementation(platform("org.jetbrains.kotlin:kotlin-bom:2.2.10"))
   implementation(platform(libs.androidx.compose.bom))
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.compose.animation)
@@ -123,12 +109,10 @@ dependencies {
   implementation(libs.androidx.hilt.navigation.compose)
 
   implementation(libs.coil.compose)
-  implementation(libs.converter.moshi)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.kotlinx.serialization.json)
   implementation(libs.logging.interceptor)
-  implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
   implementation(libs.retrofit)
 
@@ -139,10 +123,8 @@ dependencies {
   implementation(libs.androidx.camera.mlkit.vision)
   implementation(libs.mlkit.text.recognition)
   implementation(libs.mlkit.barcode.scanning)
-  implementation(libs.litertlm.android)
 
   ksp(libs.androidx.room.compiler)
-  ksp(libs.moshi.kotlin.codegen)
 
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)

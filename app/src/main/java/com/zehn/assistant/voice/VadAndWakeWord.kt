@@ -184,7 +184,7 @@ class WakeWordService : Service() {
             .setContentIntent(pendingIntent)
             .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             startForeground(NOTIF_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(NOTIF_ID, notification)
@@ -204,9 +204,13 @@ class WakeWordService : Service() {
         const val NOTIF_ID = 4101
         const val ACTION_TRIGGER_ORB = "com.zehn.assistant.ACTION_TRIGGER_ORB"
 
-        fun start(context: Context) {
+        fun start(context: Context): Boolean {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                return false
+            }
             val i = Intent(context, WakeWordService::class.java)
             ContextCompat.startForegroundService(context, i)
+            return true
         }
 
         fun stop(context: Context) {

@@ -327,7 +327,8 @@ fun UpdateScreen(vm: ZehnViewModel) {
                 Spacer(Modifier.height(6.dp))
                 Text("Target SDK 35 • Min SDK 24 • ABIs: ${Build.SUPPORTED_ABIS.joinToString(", ")}", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.FrostWhite)
                 Spacer(Modifier.height(6.dp))
-                Text("LiteRT-LM Runtime: 0.18.0 • Downloaded offline models: ${onDevice.downloadedModels.size}", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.SlateMuted)
+                val runtimeStatus = if (vm.liteRtManager.isNativeRuntimeAvailable()) "Native AAR Loaded" else "Interface Ready (Cloud/Fallback)"
+                Text("LiteRT-LM Runtime: $runtimeStatus • Downloaded offline models: ${onDevice.downloadedModels.size}", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.SlateMuted)
                 Spacer(Modifier.height(10.dp))
                 ClayActionButton(text = "Refresh Hardware & Model Cache", onClick = { vm.refreshTelemetry() })
             }

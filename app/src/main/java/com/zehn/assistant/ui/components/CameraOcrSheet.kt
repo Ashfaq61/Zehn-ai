@@ -106,112 +106,111 @@ fun CameraVisionDialog(
                     Spacer(Modifier.height(12.dp))
                     ClayActionButton(text = "Grant Camera", onClick = { permLauncher.launch(Manifest.permission.CAMERA) })
                 }
-                return@Dialog
-            }
-
-            val cameraController = remember {
-                LifecycleCameraController(context).apply {
-                    setEnabledUseCases(CameraController.IMAGE_CAPTURE or CameraController.IMAGE_ANALYSIS)
-                }
-            }
-            val textRecognizer = remember { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
-            val barcodeScanner = remember {
-                BarcodeScanning.getClient(
-                    BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS).build()
-                )
-            }
-
-            DisposableEffect(lifecycleOwner) {
-                cameraController.bindToLifecycle(lifecycleOwner)
-                cameraController.setImageAnalysisAnalyzer(
-                    ContextCompat.getMainExecutor(context),
-                    MlKitAnalyzer(
-                        listOf(textRecognizer, barcodeScanner),
-                        CameraController.COORDINATE_SYSTEM_VIEW_REFERENCED,
-                        ContextCompat.getMainExecutor(context)
-                    ) { result ->
-                        val ocr = result?.getValue(textRecognizer)?.text?.trim().orEmpty()
-                        if (ocr.isNotEmpty()) detectedOcr = ocr.take(280)
-                        val qr = result?.getValue(barcodeScanner)?.firstOrNull()?.rawValue.orEmpty()
-                        if (qr.isNotEmpty()) detectedQr = qr
-                    }
-                )
-                onDispose {
-                    cameraController.clearImageAnalysisAnalyzer()
-                    textRecognizer.close()
-                    barcodeScanner.close()
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(24.dp))
-            ) {
-                AndroidView(
-                    factory = { ctx ->
-                        PreviewView(ctx).apply { controller = cameraController }
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-                if (detectedQr.isNotBlank() || detectedOcr.isNotBlank()) {
-                    ClayGlassCard(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .fillMaxWidth()
-                            .padding(12.dp)
-                    ) {
-                        if (detectedQr.isNotBlank()) {
-                            Text("QR / Barcode: $detectedQr", color = ZehnColors.Cyan, style = MaterialTheme.typography.labelMedium)
-                        }
-                        if (detectedOcr.isNotBlank()) {
-                            Text("OCR Preview: ${detectedOcr.take(140)}", color = ZehnColors.FrostWhite, style = MaterialTheme.typography.bodyMedium)
-                        }
+            } else {
+                val cameraController = remember {
+                    LifecycleCameraController(context).apply {
+                        setEnabledUseCases(CameraController.IMAGE_CAPTURE or CameraController.IMAGE_ANALYSIS)
                     }
                 }
-            }
+                val textRecognizer = remember { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
+                val barcodeScanner = remember {
+                    BarcodeScanning.getClient(
+                        BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS).build()
+                    )
+                }
 
-            Spacer(Modifier.height(14.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                ClayActionButton(
-                    text = "Analyze Photo",
-                    icon = Icons.Filled.CameraAlt,
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        val file = File(context.cacheDir, "zehn_cam_${System.currentTimeMillis()}.jpg")
-                        val opts = ImageCapture.OutputFileOptions.Builder(file).build()
-                        cameraController.takePicture(
-                            opts,
-                            ContextCompat.getMainExecutor(context),
-                            object : ImageCapture.OnImageSavedCallback {
-                                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                                    onCapturedPhoto(Uri.fromFile(file))
-                                    onDismiss()
-                                }
+                DisposableEffect(lifecycleOwner) {
+                    cameraController.bindToLifecycle(lifecycleOwner)
+                    cameraController.setImageAnalysisAnalyzer(
+                        ContextCompat.getMainExecutor(context),
+                        MlKitAnalyzer(
+                            listOf(textRecognizer, barcodeScanner),
+                            CameraController.COORDINATE_SYSTEM_VIEW_REFERENCED,
+                            ContextCompat.getMainExecutor(context)
+                        ) { result ->
+                            val ocr = result?.getValue(textRecognizer)?.text?.trim().orEmpty()
+                            if (ocr.isNotEmpty()) detectedOcr = ocr.take(280)
+                            val qr = result?.getValue(barcodeScanner)?.firstOrNull()?.rawValue.orEmpty()
+                            if (qr.isNotEmpty()) detectedQr = qr
+                        }
+                    )
+                    onDispose {
+                        cameraController.clearImageAnalysisAnalyzer()
+                        textRecognizer.close()
+                        barcodeScanner.close()
+                    }
+                }
 
-                                override fun onError(exception: ImageCaptureException) {}
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(24.dp))
+                ) {
+                    AndroidView(
+                        factory = { ctx ->
+                            PreviewView(ctx).apply { controller = cameraController }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    if (detectedQr.isNotBlank() || detectedOcr.isNotBlank()) {
+                        ClayGlassCard(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .padding(12.dp)
+                        ) {
+                            if (detectedQr.isNotBlank()) {
+                                Text("QR / Barcode: $detectedQr", color = ZehnColors.Cyan, style = MaterialTheme.typography.labelMedium)
                             }
-                        )
-                    }
-                )
-                ClayActionButton(
-                    text = "Use OCR / QR",
-                    icon = Icons.Filled.QrCodeScanner,
-                    modifier = Modifier.weight(1f),
-                    enabled = detectedQr.isNotBlank() || detectedOcr.isNotBlank(),
-                    onClick = {
-                        val combined = buildString {
-                            if (detectedQr.isNotBlank()) appendLine("QR/Barcode: $detectedQr")
-                            if (detectedOcr.isNotBlank()) append("OCR Text:\n$detectedOcr")
+                            if (detectedOcr.isNotBlank()) {
+                                Text("OCR Preview: ${detectedOcr.take(140)}", color = ZehnColors.FrostWhite, style = MaterialTheme.typography.bodyMedium)
+                            }
                         }
-                        onScannedOcrOrQr(combined)
-                        onDismiss()
                     }
-                )
+                }
+
+                Spacer(Modifier.height(14.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    ClayActionButton(
+                        text = "Analyze Photo",
+                        icon = Icons.Filled.CameraAlt,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            val file = File(context.cacheDir, "zehn_cam_${System.currentTimeMillis()}.jpg")
+                            val opts = ImageCapture.OutputFileOptions.Builder(file).build()
+                            cameraController.takePicture(
+                                opts,
+                                ContextCompat.getMainExecutor(context),
+                                object : ImageCapture.OnImageSavedCallback {
+                                    override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                                        onCapturedPhoto(Uri.fromFile(file))
+                                        onDismiss()
+                                    }
+
+                                    override fun onError(exception: ImageCaptureException) {}
+                                }
+                            )
+                        }
+                    )
+                    ClayActionButton(
+                        text = "Use OCR / QR",
+                        icon = Icons.Filled.QrCodeScanner,
+                        modifier = Modifier.weight(1f),
+                        enabled = detectedQr.isNotBlank() || detectedOcr.isNotBlank(),
+                        onClick = {
+                            val combined = buildString {
+                                if (detectedQr.isNotBlank()) appendLine("QR/Barcode: $detectedQr")
+                                if (detectedOcr.isNotBlank()) append("OCR Text:\n$detectedOcr")
+                            }
+                            onScannedOcrOrQr(combined)
+                            onDismiss()
+                        }
+                    )
+                }
             }
         }
     }

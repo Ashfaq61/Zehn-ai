@@ -2,6 +2,7 @@ package com.zehn.assistant.ui
 
 import android.app.Application
 import android.net.Uri
+import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.zehn.assistant.agent.AgentLoop
@@ -438,11 +439,24 @@ class ZehnViewModel @Inject constructor(
     }
 
     fun toggleWakeWord(enabled: Boolean) = viewModelScope.launch {
-        prefs.updateSettings { it.copy(wakeWordEnabled = enabled) }
-        if (enabled) WakeWordService.start(app) else WakeWordService.stop(app)
+        if (enabled) {
+            val started = WakeWordService.start(app)
+            prefs.updateSettings { it.copy(wakeWordEnabled = started) }
+            if (!started) {
+                _toastBanner.value = "Grant Microphone permission in Permissions before enabling Wake Word."
+            }
+        } else {
+            prefs.updateSettings { it.copy(wakeWordEnabled = false) }
+            WakeWordService.stop(app)
+        }
     }
 
     fun toggleFloatingBubble(enabled: Boolean) = viewModelScope.launch {
+        if (enabled && !Settings.canDrawOverlays(app)) {
+            prefs.updateSettings { it.copy(floatingBubbleEnabled = false) }
+            _toastBanner.value = "Grant Display Over Other Apps permission first."
+            return@launch
+        }
         prefs.updateSettings { it.copy(floatingBubbleEnabled = enabled) }
         if (enabled) FloatingBubbleService.start(app) else FloatingBubbleService.stop(app)
     }

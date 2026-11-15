@@ -3,13 +3,6 @@ package com.zehn.assistant.ai
 import android.app.ActivityManager
 import android.content.Context
 import android.os.StatFs
-import com.google.ai.edge.litertlm.Backend
-import com.google.ai.edge.litertlm.Contents
-import com.google.ai.edge.litertlm.Conversation
-import com.google.ai.edge.litertlm.ConversationConfig
-import com.google.ai.edge.litertlm.Engine
-import com.google.ai.edge.litertlm.EngineConfig
-import com.google.ai.edge.litertlm.SamplerConfig
 import com.zehn.assistant.data.db.ActionLogDao
 import com.zehn.assistant.data.db.ActionLogEntity
 import com.zehn.assistant.data.model.LiteRtBackend
@@ -41,6 +34,134 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.cancellation.CancellationException
 
+/**
+ * Modular interface isolating on-device LLM inference runtimes (LiteRT-LM / MediaPipe GenAI)
+ * from the main app compilation unit.
+ */
+interface OnDeviceInferenceEngine {
+    fun isRuntimeAvailable(): Boolean
+    fun loadedModelPath(): String?
+    suspend fun initialize(
+        modelPath: String,
+        cacheDir: String,
+        useGpu: Boolean,
+        systemPrompt: String
+    ): Result<String>
+    fun streamPrompt(prompt: String): Flow<String>
+    suspend fun cancelActive()
+    suspend fun close()
+}
+
+/**
+ * Reflective adapter binding to com.google.ai.edge.litertlm when the native AAR is packaged,
+ * without introducing compile-time Kotlin metadata version conflicts.
+ */
+class LiteRtReflectiveInferenceEngine : OnDeviceInferenceEngine {
+    private var engineInstance: Any? = null
+    private var conversationInstance: Any? = null
+    private var currentPath: String? = null
+
+    override fun isRuntimeAvailable(): Boolean {
+        return runCatching {
+            Class.forName("com.google.ai.edge.litertlm.Engine")
+            true
+        }.getOrDefault(false)
+    }
+
+    override fun loadedModelPath(): String? = currentPath
+
+    override suspend fun initialize(
+        modelPath: String,
+        cacheDir: String,
+        useGpu: Boolean,
+        systemPrompt: String
+    ): Result<String> = runCatching {
+        val engineCls = Class.forName("com.google.ai.edge.litertlm.Engine")
+        val engineConfigCls = Class.forName("com.google.ai.edge.litertlm.EngineConfig")
+        val backendCls = Class.forName("com.google.ai.edge.litertlm.Backend")
+        val backendGpuCls = Class.forName("com.google.ai.edge.litertlm.Backend\$GPU")
+        val backendCpuCls = Class.forName("com.google.ai.edge.litertlm.Backend\$CPU")
+
+        val backendObj = if (useGpu) {
+            backendGpuCls.getDeclaredConstructor().newInstance()
+        } else {
+            backendCpuCls.getDeclaredConstructor().newInstance()
+        }
+
+        val configCtor = engineConfigCls.constructors.firstOrNull { it.parameterCount >= 3 }
+            ?: error("LiteRT EngineConfig constructor unavailable")
+        val configArgs = arrayOfNulls<Any>(configCtor.parameterCount).apply {
+            this[0] = modelPath
+            this[1] = backendObj
+            this[2] = cacheDir
+        }
+        val engineConfig = configCtor.newInstance(*configArgs)
+        val newEngine = engineCls.getDeclaredConstructor(engineConfigCls).newInstance(engineConfig)
+        engineCls.getMethod("initialize").invoke(newEngine)
+
+        val convConfigCls = Class.forName("com.google.ai.edge.litertlm.ConversationConfig")
+        val contentsCls = Class.forName("com.google.ai.edge.litertlm.Contents")
+        val samplerCls = Class.forName("com.google.ai.edge.litertlm.SamplerConfig")
+
+        val contents = contentsCls.getMethod("of", String::class.java).invoke(null, systemPrompt)
+        val sampler = samplerCls.constructors.first().let { ctor ->
+            val args = arrayOfNulls<Any>(ctor.parameterCount)
+            if (args.isNotEmpty()) args[0] = 16
+            if (args.size > 1) args[1] = 0.92
+            if (args.size > 2) args[2] = 0.7
+            ctor.newInstance(*args)
+        }
+        val convCtor = convConfigCls.constructors.first()
+        val convArgs = arrayOfNulls<Any>(convCtor.parameterCount).apply {
+            if (isNotEmpty()) this[0] = contents
+            if (size > 1) this[1] = sampler
+        }
+        val convConfig = convCtor.newInstance(*convArgs)
+        val createConv = engineCls.getMethod("createConversation", convConfigCls)
+
+        engineInstance = newEngine
+        conversationInstance = createConv.invoke(newEngine, convConfig)
+        currentPath = modelPath
+        if (useGpu && backendCls.isInstance(backendObj)) "GPU" else "CPU"
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    override fun streamPrompt(prompt: String): Flow<String> = flow {
+        val conv = conversationInstance
+            ?: throw IllegalStateException("On-device LiteRT-LM conversation is not initialized.")
+        val sendMethod = conv.javaClass.methods.firstOrNull {
+            it.name == "sendMessageAsync" && it.parameterCount == 1
+        } ?: throw IllegalStateException("LiteRT-LM sendMessageAsync method unavailable")
+        val tokenFlow = sendMethod.invoke(conv, prompt) as? Flow<Any?>
+            ?: throw IllegalStateException("LiteRT-LM stream return type incompatible")
+        tokenFlow.collect { chunk ->
+            val text = chunk?.toString().orEmpty()
+            if (text.isNotEmpty()) emit(text)
+        }
+    }
+
+    override suspend fun cancelActive() {
+        runCatching {
+            val conv = conversationInstance ?: return
+            conv.javaClass.methods.firstOrNull { it.name == "cancelProcess" }?.invoke(conv)
+        }
+    }
+
+    override suspend fun close() {
+        runCatching {
+            val conv = conversationInstance
+            conv?.javaClass?.methods?.firstOrNull { it.name == "close" }?.invoke(conv)
+        }
+        conversationInstance = null
+        runCatching {
+            val eng = engineInstance
+            eng?.javaClass?.methods?.firstOrNull { it.name == "close" }?.invoke(eng)
+        }
+        engineInstance = null
+        currentPath = null
+    }
+}
+
 data class OnDeviceModelState(
     val totalRamMb: Long = 0L,
     val availableStorageMb: Long = 0L,
@@ -67,9 +188,8 @@ class OnDeviceLiteRtManager @Inject constructor(
     private val singleExecutor = Executors.newSingleThreadExecutor()
     private val scope = CoroutineScope(SupervisorJob() + singleExecutor.asCoroutineDispatcher())
     private val mutex = Mutex()
+    private val inferenceEngine: OnDeviceInferenceEngine = LiteRtReflectiveInferenceEngine()
 
-    private var engine: Engine? = null
-    private var conversation: Conversation? = null
     private var downloadJob: Job? = null
 
     private val modelsDir = File(context.filesDir, "models").apply { mkdirs() }
@@ -80,6 +200,8 @@ class OnDeviceLiteRtManager @Inject constructor(
     init {
         refreshDeviceCapabilities()
     }
+
+    fun isNativeRuntimeAvailable(): Boolean = inferenceEngine.isRuntimeAvailable()
 
     fun refreshDeviceCapabilities() {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
@@ -236,85 +358,76 @@ class OnDeviceLiteRtManager @Inject constructor(
                     }
                     return@withLock false
                 }
-                if (engine?.engineConfig?.modelPath == file.absolutePath && _state.value.engineReady) {
+                if (!inferenceEngine.isRuntimeAvailable()) {
+                    _state.update {
+                        it.copy(
+                            lastError = "LiteRT-LM native AAR is not bundled in this build; switch to Cloud/Hybrid mode or bundle litertlm-android."
+                        )
+                    }
+                    return@withLock false
+                }
+                if (inferenceEngine.loadedModelPath() == file.absolutePath && _state.value.engineReady) {
                     return@withLock true
                 }
                 releaseInternal()
 
-                val chosenBackend = when (backendPref) {
-                    LiteRtBackend.GPU -> Backend.GPU()
-                    LiteRtBackend.CPU, LiteRtBackend.NPU -> Backend.CPU()
-                    LiteRtBackend.AUTO -> if (_state.value.totalRamMb >= 5500L) Backend.GPU() else Backend.CPU()
+                val useGpu = when (backendPref) {
+                    LiteRtBackend.GPU -> true
+                    LiteRtBackend.CPU, LiteRtBackend.NPU -> false
+                    LiteRtBackend.AUTO -> _state.value.totalRamMb >= 5500L
                 }
-                val backendLabel = if (chosenBackend is Backend.GPU) "GPU" else "CPU"
 
-                return@withLock try {
-                    val config = EngineConfig(
-                        modelPath = file.absolutePath,
-                        backend = chosenBackend,
-                        cacheDir = context.cacheDir.path
-                    )
-                    val newEngine = Engine(config).also { it.initialize() }
-                    engine = newEngine
-                    conversation = newEngine.createConversation(
-                        ConversationConfig(
-                            systemInstruction = Contents.of(systemPrompt),
-                            samplerConfig = SamplerConfig(topK = 16, topP = 0.92, temperature = 0.7)
-                        )
-                    )
+                val primaryResult = inferenceEngine.initialize(
+                    modelPath = file.absolutePath,
+                    cacheDir = context.cacheDir.path,
+                    useGpu = useGpu,
+                    systemPrompt = systemPrompt
+                )
+
+                if (primaryResult.isSuccess) {
                     _state.update {
                         it.copy(
                             engineReady = true,
                             activeModelId = spec.id,
-                            activeBackendLabel = backendLabel,
+                            activeBackendLabel = primaryResult.getOrDefault(if (useGpu) "GPU" else "CPU"),
                             lastError = null
                         )
                     }
-                    true
-                } catch (e: Exception) {
-                    // Fallback to CPU if GPU OpenCL initialization fails
-                    if (chosenBackend is Backend.GPU) {
-                        return@withLock try {
-                            releaseInternal()
-                            val cpuConfig = EngineConfig(
-                                modelPath = file.absolutePath,
-                                backend = Backend.CPU(),
-                                cacheDir = context.cacheDir.path
+                    return@withLock true
+                }
+
+                if (useGpu) {
+                    releaseInternal()
+                    val cpuFallback = inferenceEngine.initialize(
+                        modelPath = file.absolutePath,
+                        cacheDir = context.cacheDir.path,
+                        useGpu = false,
+                        systemPrompt = systemPrompt
+                    )
+                    if (cpuFallback.isSuccess) {
+                        _state.update {
+                            it.copy(
+                                engineReady = true,
+                                activeModelId = spec.id,
+                                activeBackendLabel = "CPU (Auto-Fallback)",
+                                lastError = null
                             )
-                            val cpuEngine = Engine(cpuConfig).also { it.initialize() }
-                            engine = cpuEngine
-                            conversation = cpuEngine.createConversation(
-                                ConversationConfig(
-                                    systemInstruction = Contents.of(systemPrompt),
-                                    samplerConfig = SamplerConfig(topK = 16, topP = 0.92, temperature = 0.7)
-                                )
-                            )
-                            _state.update {
-                                it.copy(
-                                    engineReady = true,
-                                    activeModelId = spec.id,
-                                    activeBackendLabel = "CPU (Auto-Fallback)",
-                                    lastError = null
-                                )
-                            }
-                            true
-                        } catch (cpuEx: Exception) {
-                            releaseInternal()
-                            _state.update { it.copy(lastError = cpuEx.message) }
-                            false
                         }
-                    } else {
-                        releaseInternal()
-                        _state.update { it.copy(lastError = e.message) }
-                        false
+                        return@withLock true
                     }
+                    releaseInternal()
+                    _state.update { it.copy(lastError = cpuFallback.exceptionOrNull()?.message) }
+                    return@withLock false
+                } else {
+                    releaseInternal()
+                    _state.update { it.copy(lastError = primaryResult.exceptionOrNull()?.message) }
+                    return@withLock false
                 }
             }
         }
 
     fun streamPrompt(prompt: String): Flow<LlmStreamEvent> = flow {
-        val conv = conversation
-        if (!_state.value.engineReady || conv == null) {
+        if (!_state.value.engineReady) {
             emit(LlmStreamEvent.ErrorEvent("LiteRT-LM model is not loaded. Download and load Gemma 4 E2B or Qwen3 first."))
             return@flow
         }
@@ -326,8 +439,7 @@ class OnDeviceLiteRtManager @Inject constructor(
         val startMs = System.currentTimeMillis()
         var tokenCount = 0
         try {
-            conv.sendMessageAsync(prompt).collect { chunk ->
-                val text = chunk.toString()
+            inferenceEngine.streamPrompt(prompt).collect { text ->
                 if (text.isNotEmpty()) {
                     tokenCount++
                     emit(LlmStreamEvent.TextDelta(text))
@@ -349,7 +461,7 @@ class OnDeviceLiteRtManager @Inject constructor(
 
     fun cancelActiveGeneration() {
         scope.launch {
-            conversation?.cancelProcess()
+            inferenceEngine.cancelActive()
         }
     }
 
@@ -368,13 +480,10 @@ class OnDeviceLiteRtManager @Inject constructor(
     private suspend fun releaseInternal() {
         _state.update { it.copy(engineReady = false) }
         while (_state.value.busy) {
-            conversation?.cancelProcess()
+            inferenceEngine.cancelActive()
             delay(100)
         }
-        runCatching { conversation?.close() }
-        conversation = null
-        runCatching { engine?.close() }
-        engine = null
+        inferenceEngine.close()
         _state.update { it.copy(activeModelId = null, activeBackendLabel = "Idle") }
     }
 }

@@ -405,7 +405,11 @@ class CloudLlmClient @Inject constructor(
                 emit(LlmStreamEvent.ErrorEvent("Anthropic HTTP ${resp.code}: ${resp.body?.string()?.take(180)}", resp.code))
                 return@use
             }
-            val reader = BufferedReader(InputStreamReader(resp.body!!.byteStream()))
+            val body = resp.body ?: run {
+                emit(LlmStreamEvent.ErrorEvent("Empty Anthropic stream"))
+                return@use
+            }
+            val reader = BufferedReader(InputStreamReader(body.byteStream()))
             var line: String?
             while (reader.readLine().also { line = it } != null) {
                 if (safetyPolicy.policy.value.emergencyStopped) break
