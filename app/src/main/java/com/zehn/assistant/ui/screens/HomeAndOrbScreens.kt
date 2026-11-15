@@ -1,5 +1,9 @@
 package com.zehn.assistant.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -44,9 +48,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zehn.assistant.data.model.OrbState
 import com.zehn.assistant.ui.ZehnViewModel
@@ -73,6 +79,24 @@ fun HomeScreen(
     val planState by vm.agentPlanState.collectAsStateWithLifecycle()
     val triggers by vm.triggers.collectAsStateWithLifecycle()
     val crashReport by vm.lastCrashReport.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            vm.voiceCoordinator.startVoiceTurn()
+        } else {
+            vm.showBanner("Microphone permission is required for voice input.")
+        }
+    }
+
+    fun startMicWithPermission() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            vm.voiceCoordinator.startVoiceTurn()
+        } else {
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -142,7 +166,7 @@ fun HomeScreen(
                         micLevel = voiceState.micLevel,
                         sizeDp = 164.dp,
                         onClick = {
-                            if (voiceState.orbState == OrbState.IDLE) vm.voiceCoordinator.startVoiceTurn()
+                            if (voiceState.orbState == OrbState.IDLE) startMicWithPermission()
                             else vm.voiceCoordinator.bargeIn()
                         },
                         modifier = Modifier.testTag("home_orb_button")
@@ -298,6 +322,24 @@ fun OrbScreen(
     val settings by vm.settings.collectAsStateWithLifecycle()
     val policy by vm.policy.collectAsStateWithLifecycle()
     val planState by vm.agentPlanState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            vm.voiceCoordinator.startVoiceTurn()
+        } else {
+            vm.showBanner("Microphone permission is required for voice input.")
+        }
+    }
+
+    fun startMicWithPermission() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            vm.voiceCoordinator.startVoiceTurn()
+        } else {
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -333,7 +375,7 @@ fun OrbScreen(
                 micLevel = voiceState.micLevel,
                 sizeDp = 248.dp,
                 onClick = {
-                    if (voiceState.orbState == OrbState.IDLE) vm.voiceCoordinator.startVoiceTurn()
+                    if (voiceState.orbState == OrbState.IDLE) startMicWithPermission()
                     else vm.voiceCoordinator.bargeIn()
                 },
                 modifier = Modifier.testTag("immersive_orb_button")
@@ -380,7 +422,7 @@ fun OrbScreen(
                     isDanger = voiceState.orbState != OrbState.IDLE,
                     modifier = Modifier.weight(1f),
                     onClick = {
-                        if (voiceState.orbState == OrbState.IDLE) vm.voiceCoordinator.startVoiceTurn()
+                        if (voiceState.orbState == OrbState.IDLE) startMicWithPermission()
                         else vm.voiceCoordinator.bargeIn()
                     }
                 )

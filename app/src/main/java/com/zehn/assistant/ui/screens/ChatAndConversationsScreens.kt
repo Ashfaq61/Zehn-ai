@@ -1,5 +1,7 @@
 package com.zehn.assistant.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -54,9 +56,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.zehn.assistant.ai.ProviderCatalog
@@ -94,6 +98,17 @@ fun ChatScreen(
 
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) attachedImage = uri
+    }
+
+    val context = LocalContext.current
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            vm.voiceCoordinator.startVoiceTurn()
+        } else {
+            vm.showBanner("Microphone permission is required for voice input.")
+        }
     }
 
     Column(
@@ -285,7 +300,11 @@ fun ChatScreen(
             IconButton(
                 onClick = {
                     if (input.isBlank() && attachedImage == null) {
-                        vm.voiceCoordinator.startVoiceTurn()
+                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                            vm.voiceCoordinator.startVoiceTurn()
+                        } else {
+                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
                     } else {
                         vm.sendChatMessage(input, attachedImage)
                         input = ""

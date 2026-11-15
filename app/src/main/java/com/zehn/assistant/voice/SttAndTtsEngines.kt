@@ -1,7 +1,9 @@
 package com.zehn.assistant.voice
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -10,6 +12,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import androidx.core.content.ContextCompat
 import com.zehn.assistant.data.model.SttEngineType
 import com.zehn.assistant.data.model.VoiceLanguage
 import com.zehn.assistant.data.model.VoiceProfile
@@ -54,68 +57,78 @@ class AndroidSttEngine @Inject constructor(
         onError: (String) -> Unit
     ) {
         mainHandler.post {
-            if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-                onError("No system SpeechRecognizer service installed on device.")
-                return@post
-            }
-            runCatching { recognizer?.destroy() }
-            recognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
-                setRecognitionListener(object : RecognitionListener {
-                    override fun onReadyForSpeech(params: Bundle?) {
-                        _isListening.value = true
-                        _partialTranscript.value = ""
-                    }
-
-                    override fun onBeginningOfSpeech() {}
-                    override fun onRmsChanged(rmsdB: Float) {}
-                    override fun onBufferReceived(buffer: ByteArray?) {}
-                    override fun onEndOfSpeech() {
-                        _isListening.value = false
-                    }
-
-                    override fun onError(error: Int) {
-                        _isListening.value = false
-                        val msg = when (error) {
-                            SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized. Try again."
-                            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out."
-                            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission required."
-                            else -> "Speech recognition error ($error)"
-                        }
-                        onError(msg)
-                    }
-
-                    override fun onResults(results: Bundle?) {
-                        _isListening.value = false
-                        val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                            ?.firstOrNull().orEmpty().trim()
-                        if (text.isNotEmpty()) {
-                            _partialTranscript.value = text
-                            onFinalResult(text)
-                        } else {
-                            onError("Empty speech result")
-                        }
-                    }
-
-                    override fun onPartialResults(partialResults: Bundle?) {
-                        val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                            ?.firstOrNull().orEmpty()
-                        if (partial.isNotBlank()) _partialTranscript.value = partial
-                    }
-
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
-                })
-            }
-
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, language.bcp47)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                if (engineType == SttEngineType.VOSK_OFFLINE) {
-                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            try {
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    _isListening.value = false
+                    onError("Microphone permission (RECORD_AUDIO) is required.")
+                    return@post
                 }
+                if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+                    onError("No system SpeechRecognizer service installed on device.")
+                    return@post
+                }
+                runCatching { recognizer?.destroy() }
+                recognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+                    setRecognitionListener(object : RecognitionListener {
+                        override fun onReadyForSpeech(params: Bundle?) {
+                            _isListening.value = true
+                            _partialTranscript.value = ""
+                        }
+
+                        override fun onBeginningOfSpeech() {}
+                        override fun onRmsChanged(rmsdB: Float) {}
+                        override fun onBufferReceived(buffer: ByteArray?) {}
+                        override fun onEndOfSpeech() {
+                            _isListening.value = false
+                        }
+
+                        override fun onError(error: Int) {
+                            _isListening.value = false
+                            val msg = when (error) {
+                                SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized. Try again."
+                                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out."
+                                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission required."
+                                else -> "Speech recognition error ($error)"
+                            }
+                            onError(msg)
+                        }
+
+                        override fun onResults(results: Bundle?) {
+                            _isListening.value = false
+                            val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                                ?.firstOrNull().orEmpty().trim()
+                            if (text.isNotEmpty()) {
+                                _partialTranscript.value = text
+                                onFinalResult(text)
+                            } else {
+                                onError("Empty speech result")
+                            }
+                        }
+
+                        override fun onPartialResults(partialResults: Bundle?) {
+                            val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                                ?.firstOrNull().orEmpty()
+                            if (partial.isNotBlank()) _partialTranscript.value = partial
+                        }
+
+                        override fun onEvent(eventType: Int, params: Bundle?) {}
+                    })
+                }
+
+                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, language.bcp47)
+                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                    if (engineType == SttEngineType.VOSK_OFFLINE) {
+                        putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                    }
+                }
+                recognizer?.startListening(intent)
+            } catch (e: Exception) {
+                _isListening.value = false
+                onError(e.message ?: "Failed to start microphone recognition")
             }
-            recognizer?.startListening(intent)
         }
     }
 
@@ -156,24 +169,26 @@ class SentenceStreamingTtsEngine @Inject constructor(
     private var pitchMult = 1.0f
 
     init {
-        tts = TextToSpeech(context) { status ->
-            ready = (status == TextToSpeech.SUCCESS)
-            if (ready) {
-                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) {
-                        _isSpeaking.value = true
-                    }
+        runCatching {
+            tts = TextToSpeech(context) { status ->
+                ready = (status == TextToSpeech.SUCCESS)
+                if (ready) {
+                    tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {
+                            _isSpeaking.value = true
+                        }
 
-                    override fun onDone(utteranceId: String?) {
-                        _isSpeaking.value = false
-                    }
+                        override fun onDone(utteranceId: String?) {
+                            _isSpeaking.value = false
+                        }
 
-                    @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String?) {
-                        _isSpeaking.value = false
-                    }
-                })
-                applyVoiceConfig(activeProfile, VoiceLanguage.AUTO)
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String?) {
+                            _isSpeaking.value = false
+                        }
+                    })
+                    applyVoiceConfig(activeProfile, VoiceLanguage.AUTO)
+                }
             }
         }
     }
@@ -192,20 +207,22 @@ class SentenceStreamingTtsEngine @Inject constructor(
 
     private fun applyVoiceConfig(profile: VoiceProfile, detectedLang: VoiceLanguage) {
         if (!ready) return
-        val localeTag = when (detectedLang) {
-            VoiceLanguage.URDU -> "ur-PK"
-            VoiceLanguage.HINDI -> "hi-IN"
-            VoiceLanguage.HINGLISH -> "en-IN"
-            VoiceLanguage.ENGLISH -> "en-US"
-            VoiceLanguage.AUTO -> profile.localeTag
+        runCatching {
+            val localeTag = when (detectedLang) {
+                VoiceLanguage.URDU -> "ur-PK"
+                VoiceLanguage.HINDI -> "hi-IN"
+                VoiceLanguage.HINGLISH -> "en-IN"
+                VoiceLanguage.ENGLISH -> "en-US"
+                VoiceLanguage.AUTO -> profile.localeTag
+            }
+            val locale = Locale.forLanguageTag(localeTag)
+            val res = tts?.setLanguage(locale)
+            if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
+                tts?.setLanguage(Locale.US)
+            }
+            tts?.setPitch((profile.pitch * pitchMult).coerceIn(0.6f, 1.6f))
+            tts?.setSpeechRate((profile.rate * rateMult).coerceIn(0.6f, 1.8f))
         }
-        val locale = Locale.forLanguageTag(localeTag)
-        val res = tts?.setLanguage(locale)
-        if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
-            tts?.setLanguage(Locale.US)
-        }
-        tts?.setPitch((profile.pitch * pitchMult).coerceIn(0.6f, 1.6f))
-        tts?.setSpeechRate((profile.rate * rateMult).coerceIn(0.6f, 1.8f))
     }
 
     @Synchronized
@@ -240,7 +257,11 @@ class SentenceStreamingTtsEngine @Inject constructor(
         val clean = text.replace(Regex("[*#`]+"), "").trim()
         if (clean.isEmpty()) return
         _isSpeaking.value = true
-        tts?.speak(clean, TextToSpeech.QUEUE_ADD, null, UUID.randomUUID().toString())
+        runCatching {
+            tts?.speak(clean, TextToSpeech.QUEUE_ADD, null, UUID.randomUUID().toString())
+        }.onFailure {
+            _isSpeaking.value = false
+        }
     }
 
     @Synchronized

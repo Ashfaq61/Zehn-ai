@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.zehn.assistant.ZehnApplication
 import com.zehn.assistant.agent.AgentLoop
 import com.zehn.assistant.agent.AgentPlanState
 import com.zehn.assistant.agent.CallAssistantManager
@@ -60,6 +61,7 @@ import com.zehn.assistant.voice.VoicePipelineCoordinator
 import com.zehn.assistant.voice.VoicePipelineUiState
 import com.zehn.assistant.voice.WakeWordService
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -68,6 +70,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.io.File
 import javax.inject.Inject
 
 @HiltViewModel
@@ -165,6 +168,9 @@ class ZehnViewModel @Inject constructor(
     private val _autoTunerOutput = MutableStateFlow("")
     val autoTunerOutput: StateFlow<String> = _autoTunerOutput.asStateFlow()
 
+    private val _crashFileText = MutableStateFlow<String?>(readCrashLogFile())
+    val crashFileText: StateFlow<String?> = _crashFileText.asStateFlow()
+
     init {
         viewModelScope.launch {
             val allConvs = conversationDao.getAllOnce()
@@ -172,6 +178,29 @@ class ZehnViewModel @Inject constructor(
                 _activeConversationId.value = allConvs.first().id
             }
         }
+        viewModelScope.launch {
+            voiceCoordinator.errors.collect { err ->
+                if (err.isNotBlank()) {
+                    _toastBanner.value = err
+                }
+            }
+        }
+    }
+
+    private fun readCrashLogFile(): String? {
+        return runCatching {
+            val file = File(app.filesDir, ZehnApplication.CRASH_LOG_FILE_NAME)
+            if (file.exists()) file.readText().takeIf { it.isNotBlank() } else null
+        }.getOrNull()
+    }
+
+    fun clearCrashLogFile() {
+        runCatching {
+            val file = File(app.filesDir, ZehnApplication.CRASH_LOG_FILE_NAME)
+            if (file.exists()) file.delete()
+        }
+        _crashFileText.value = null
+        crashRecoveryManager.dismissCrashReport()
     }
 
     fun clearBanner() {
@@ -246,108 +275,118 @@ class ZehnViewModel @Inject constructor(
             _chatBusy.value = true
             _streamingDraft.value = ""
 
-            var convId = _activeConversationId.value
-            val existing = conversationDao.getAllOnce().firstOrNull { it.id == convId }
-            if (existing == null) {
-                convId = conversationDao.insert(
-                    ConversationEntity(
-                        title = clean.take(36).ifBlank { "Vision Query" },
-                        providerName = settings.value.activeProvider.name,
-                        modelName = settings.value.activeModel
-                    )
-                )
-                _activeConversationId.value = convId
-            } else if (existing.title == "New Chat" && clean.isNotBlank()) {
-                conversationDao.update(existing.copy(title = clean.take(36), updatedAt = System.currentTimeMillis()))
-            }
-
-            val detectedLang = LanguageDetector.detect(clean, settings.value.voiceLanguage)
-            messageDao.insert(
-                MessageEntity(
-                    conversationId = convId,
-                    role = "user",
-                    content = clean.ifBlank { "Analyze attached image" },
-                    imageUri = attachedImageUri?.toString(),
-                    detectedLanguage = detectedLang.code
-                )
-            )
-
-            // Record working memory scratchpad
-            memoryDao.insert(
-                MemoryEntity(
-                    tier = MemoryTier.WORKING.name,
-                    title = "Last User Query",
-                    content = clean.take(180),
-                    priority = 6
-                )
-            )
-
-            // Try fast-path / agent command if no image attached
-            if (attachedImageUri == null) {
-                val agentReply = agentLoop.tryExecuteCommand(clean)
-                if (agentReply != null) {
-                    messageDao.insert(
-                        MessageEntity(
-                            conversationId = convId,
-                            role = "assistant",
-                            content = agentReply,
-                            modelUsed = "Zehn Agent",
-                            detectedLanguage = detectedLang.code
+            try {
+                var convId = _activeConversationId.value
+                val existing = conversationDao.getAllOnce().firstOrNull { it.id == convId }
+                if (existing == null) {
+                    convId = conversationDao.insert(
+                        ConversationEntity(
+                            title = clean.take(36).ifBlank { "Vision Query" },
+                            providerName = settings.value.activeProvider.name,
+                            modelName = settings.value.activeModel
                         )
                     )
-                    if (speakReply) voiceCoordinator.previewVoice(settings.value.activeVoice)
-                    _chatBusy.value = false
-                    return@launch
+                    _activeConversationId.value = convId
+                } else if (existing.title == "New Chat" && clean.isNotBlank()) {
+                    conversationDao.update(existing.copy(title = clean.take(36), updatedAt = System.currentTimeMillis()))
                 }
-            }
 
-            val history = messageDao.getForConversationOnce(convId)
-                .takeLast(12)
-                .map { LlmMessage(it.role, it.content) }
+                val detectedLang = LanguageDetector.detect(clean, settings.value.voiceLanguage)
+                messageDao.insert(
+                    MessageEntity(
+                        conversationId = convId,
+                        role = "user",
+                        content = clean.ifBlank { "Analyze attached image" },
+                        imageUri = attachedImageUri?.toString(),
+                        detectedLanguage = detectedLang.code
+                    )
+                )
 
-            val replyAcc = StringBuilder()
-            var citationsText = ""
-            var usedModel = settings.value.activeModel
-            var errMsg: String? = null
+                // Record working memory scratchpad
+                memoryDao.insert(
+                    MemoryEntity(
+                        tier = MemoryTier.WORKING.name,
+                        title = "Last User Query",
+                        content = clean.take(180),
+                        priority = 6
+                    )
+                )
 
-            aiRouter.routeAndStream(
-                history = history,
-                userInput = clean.ifBlank { "Describe and analyze this image carefully." },
-                projectId = _selectedProjectId.value,
-                imageUri = attachedImageUri
-            ).collect { ev ->
-                if (ev.modelUsed.isNotBlank()) usedModel = ev.modelUsed
-                if (ev.citations.isNotEmpty()) {
-                    citationsText = ev.citations.joinToString("\n") {
-                        "• ${it.documentName} (p.${it.pageOrSection})"
+                // Try fast-path / agent command if no image attached
+                if (attachedImageUri == null) {
+                    val agentReply = agentLoop.tryExecuteCommand(clean)
+                    if (agentReply != null) {
+                        messageDao.insert(
+                            MessageEntity(
+                                conversationId = convId,
+                                role = "assistant",
+                                content = agentReply,
+                                modelUsed = "Zehn Agent",
+                                detectedLanguage = detectedLang.code
+                            )
+                        )
+                        if (speakReply) voiceCoordinator.previewVoice(settings.value.activeVoice)
+                        return@launch
                     }
                 }
-                if (ev.delta.isNotEmpty()) {
-                    replyAcc.append(ev.delta)
-                    _streamingDraft.value = replyAcc.toString()
-                }
-                if (ev.error != null) errMsg = ev.error
-            }
 
-            val finalContent = buildString {
-                val main = replyAcc.toString().ifBlank { errMsg ?: "No response." }
-                append(main)
-                if (citationsText.isNotBlank() && errMsg == null) {
-                    append("\n\nSources:\n$citationsText")
-                }
-            }
+                val history = messageDao.getForConversationOnce(convId)
+                    .takeLast(12)
+                    .map { LlmMessage(it.role, it.content) }
 
-            messageDao.insert(
-                MessageEntity(
-                    conversationId = convId,
-                    role = "assistant",
-                    content = finalContent,
-                    modelUsed = usedModel,
-                    detectedLanguage = detectedLang.code
+                val replyAcc = StringBuilder()
+                var citationsText = ""
+                var usedModel = settings.value.activeModel
+                var errMsg: String? = null
+
+                aiRouter.routeAndStream(
+                    history = history,
+                    userInput = clean.ifBlank { "Describe and analyze this image carefully." },
+                    projectId = _selectedProjectId.value,
+                    imageUri = attachedImageUri
+                ).collect { ev ->
+                    if (ev.modelUsed.isNotBlank()) usedModel = ev.modelUsed
+                    if (ev.citations.isNotEmpty()) {
+                        citationsText = ev.citations.joinToString("\n") {
+                            "• ${it.documentName} (p.${it.pageOrSection})"
+                        }
+                    }
+                    if (ev.delta.isNotEmpty()) {
+                        replyAcc.append(ev.delta)
+                        _streamingDraft.value = replyAcc.toString()
+                    }
+                    if (ev.error != null) errMsg = ev.error
+                }
+
+                if (errMsg != null) {
+                    _toastBanner.value = errMsg
+                }
+
+                val finalContent = buildString {
+                    val main = replyAcc.toString().ifBlank { errMsg ?: "No response." }
+                    append(main)
+                    if (citationsText.isNotBlank() && errMsg == null) {
+                        append("\n\nSources:\n$citationsText")
+                    }
+                }
+
+                messageDao.insert(
+                    MessageEntity(
+                        conversationId = convId,
+                        role = "assistant",
+                        content = finalContent,
+                        modelUsed = usedModel,
+                        detectedLanguage = detectedLang.code
+                    )
                 )
-            )
-            _streamingDraft.value = ""
-            _chatBusy.value = false
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _toastBanner.value = "Chat failed: ${e.message ?: "Unexpected error"}"
+            } finally {
+                _streamingDraft.value = ""
+                _chatBusy.value = false
+            }
         }
     }
 
@@ -355,30 +394,39 @@ class ZehnViewModel @Inject constructor(
         if (prompt.isBlank()) return
         viewModelScope.launch {
             _chatBusy.value = true
-            val convId = _activeConversationId.value
-            messageDao.insert(MessageEntity(conversationId = convId, role = "user", content = "/imagine $prompt"))
-            val res = cloudLlmClient.generateImage(prompt)
-            res.onSuccess { path ->
-                messageDao.insert(
-                    MessageEntity(
-                        conversationId = convId,
-                        role = "assistant",
-                        content = "Generated image for \"$prompt\":",
-                        imageUri = Uri.fromFile(java.io.File(path)).toString(),
-                        modelUsed = "Image Generator"
+            try {
+                val convId = _activeConversationId.value
+                messageDao.insert(MessageEntity(conversationId = convId, role = "user", content = "/imagine $prompt"))
+                val res = cloudLlmClient.generateImage(prompt)
+                res.onSuccess { path ->
+                    messageDao.insert(
+                        MessageEntity(
+                            conversationId = convId,
+                            role = "assistant",
+                            content = "Generated image for \"$prompt\":",
+                            imageUri = Uri.fromFile(File(path)).toString(),
+                            modelUsed = "Image Generator"
+                        )
                     )
-                )
-            }.onFailure { e ->
-                messageDao.insert(
-                    MessageEntity(
-                        conversationId = convId,
-                        role = "assistant",
-                        content = e.message ?: "Image generation failed",
-                        modelUsed = "Safety / Image"
+                }.onFailure { e ->
+                    val errText = e.message ?: "Image generation failed"
+                    _toastBanner.value = errText
+                    messageDao.insert(
+                        MessageEntity(
+                            conversationId = convId,
+                            role = "assistant",
+                            content = errText,
+                            modelUsed = "Safety / Image"
+                        )
                     )
-                )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _toastBanner.value = "Image generation failed: ${e.message ?: "Unexpected error"}"
+            } finally {
+                _chatBusy.value = false
             }
-            _chatBusy.value = false
         }
     }
 

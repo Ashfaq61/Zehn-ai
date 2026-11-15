@@ -8,12 +8,16 @@ import com.zehn.assistant.data.model.OrbState
 import com.zehn.assistant.data.model.VoiceLanguage
 import com.zehn.assistant.data.model.VoiceProfile
 import com.zehn.assistant.security.SafetyPolicyManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
@@ -47,168 +51,229 @@ class VoicePipelineCoordinator @Inject constructor(
     private val _uiState = MutableStateFlow(VoicePipelineUiState())
     val uiState: StateFlow<VoicePipelineUiState> = _uiState.asStateFlow()
 
+    private val _errors = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val errors: SharedFlow<String> = _errors.asSharedFlow()
+
     init {
         scope.launch {
-            vad.micLevel.collect { level ->
-                _uiState.update { it.copy(micLevel = level) }
-                // Barge-in: if user speaks loudly while Zehn is speaking, interrupt immediately
-                if (_uiState.value.orbState == OrbState.SPEAKING && level > 0.62f) {
-                    bargeIn()
+            try {
+                vad.micLevel.collect { level ->
+                    _uiState.update { it.copy(micLevel = level) }
+                    // Barge-in: if user speaks loudly while Zehn is speaking, interrupt immediately
+                    if (_uiState.value.orbState == OrbState.SPEAKING && level > 0.62f) {
+                        bargeIn()
+                    }
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _errors.tryEmit(e.message ?: "Voice activity monitor failed")
             }
         }
         scope.launch {
-            stt.partialTranscript.collect { partial ->
-                if (partial.isNotBlank()) {
-                    _uiState.update { it.copy(liveTranscript = partial) }
+            try {
+                stt.partialTranscript.collect { partial ->
+                    if (partial.isNotBlank()) {
+                        _uiState.update { it.copy(liveTranscript = partial) }
+                    }
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _errors.tryEmit(e.message ?: "Speech transcript listener failed")
             }
         }
     }
 
     fun startVoiceTurn() {
-        if (safetyPolicy.policy.value.emergencyStopped) {
-            _uiState.update { it.copy(statusBanner = "Emergency STOP active — clear STOP first") }
-            return
-        }
-        // Barge-in if currently speaking or thinking
-        if (_uiState.value.orbState == OrbState.SPEAKING || _uiState.value.orbState == OrbState.THINKING) {
-            bargeIn()
-        }
-
-        scope.launch {
-            val settings = prefs.settings.first()
-            _uiState.update {
-                it.copy(
-                    orbState = OrbState.LISTENING,
-                    liveTranscript = "",
-                    statusBanner = "Listening (${settings.voiceLanguage.label})..."
-                )
+        try {
+            if (safetyPolicy.policy.value.emergencyStopped) {
+                val msg = "Emergency STOP active — clear STOP first"
+                _uiState.update { it.copy(statusBanner = msg) }
+                _errors.tryEmit(msg)
+                return
             }
-            vad.startMonitoring(settings.vadEngine)
-            stt.startListening(
-                language = settings.voiceLanguage,
-                engineType = settings.sttEngine,
-                onFinalResult = { transcript ->
-                    vad.stopMonitoring()
-                    processSpokenQuery(transcript)
-                },
-                onError = { err ->
-                    vad.stopMonitoring()
+            // Barge-in if currently speaking or thinking
+            if (_uiState.value.orbState == OrbState.SPEAKING || _uiState.value.orbState == OrbState.THINKING) {
+                bargeIn()
+            }
+
+            scope.launch {
+                try {
+                    val settings = prefs.settings.first()
                     _uiState.update {
-                        it.copy(orbState = OrbState.IDLE, statusBanner = err)
+                        it.copy(
+                            orbState = OrbState.LISTENING,
+                            liveTranscript = "",
+                            statusBanner = "Listening (${settings.voiceLanguage.label})..."
+                        )
                     }
+                    vad.startMonitoring(settings.vadEngine)
+                    stt.startListening(
+                        language = settings.voiceLanguage,
+                        engineType = settings.sttEngine,
+                        onFinalResult = { transcript ->
+                            runCatching { vad.stopMonitoring() }
+                            processSpokenQuery(transcript)
+                        },
+                        onError = { err ->
+                            runCatching { vad.stopMonitoring() }
+                            _uiState.update {
+                                it.copy(orbState = OrbState.IDLE, statusBanner = err)
+                            }
+                            _errors.tryEmit(err)
+                        }
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    runCatching { vad.stopMonitoring() }
+                    val msg = e.message ?: "Voice capture error"
+                    _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = msg) }
+                    _errors.tryEmit(msg)
                 }
-            )
+            }
+        } catch (e: Exception) {
+            val msg = e.message ?: "Unable to start voice pipeline"
+            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = msg) }
+            _errors.tryEmit(msg)
         }
     }
 
     fun bargeIn() {
-        activeTurnJob?.cancel()
-        tts.stop()
-        stt.stopListening()
-        _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Interrupted (Barge-in)") }
+        try {
+            activeTurnJob?.cancel()
+            tts.stop()
+            stt.stopListening()
+            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Interrupted (Barge-in)") }
+        } catch (e: Exception) {
+            val msg = e.message ?: "Voice interruption error"
+            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = msg) }
+            _errors.tryEmit(msg)
+        }
     }
 
     fun stopAll() {
-        activeTurnJob?.cancel()
-        vad.stopMonitoring()
-        stt.stopListening()
-        tts.stop()
-        realtimeWs.disconnect()
-        _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Stopped") }
+        try {
+            activeTurnJob?.cancel()
+            vad.stopMonitoring()
+            stt.stopListening()
+            tts.stop()
+            realtimeWs.disconnect()
+            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Stopped") }
+        } catch (e: Exception) {
+            val msg = e.message ?: "Failed to stop voice pipeline cleanly"
+            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = msg) }
+            _errors.tryEmit(msg)
+        }
     }
 
     fun previewVoice(profile: VoiceProfile) {
-        val sample = when (profile.localeTag) {
-            "ur-PK" -> "Assalam-o-Alaikum, main ${profile.displayName} hoon — aapka Zehn voice assistant."
-            "hi-IN" -> "Namaste, main ${profile.displayName} hoon — Zehn AI aapki seva mein hai."
-            else -> "Hello, I'm ${profile.displayName}, ready to assist on Zehn AI."
+        try {
+            val sample = when (profile.localeTag) {
+                "ur-PK" -> "Assalam-o-Alaikum, main ${profile.displayName} hoon — aapka Zehn voice assistant."
+                "hi-IN" -> "Namaste, main ${profile.displayName} hoon — Zehn AI aapki seva mein hai."
+                else -> "Hello, I'm ${profile.displayName}, ready to assist on Zehn AI."
+            }
+            tts.speakImmediate(sample, profile)
+        } catch (e: Exception) {
+            _errors.tryEmit(e.message ?: "Voice preview failed")
         }
-        tts.speakImmediate(sample, profile)
     }
 
     fun processSpokenQuery(transcript: String) {
         activeTurnJob?.cancel()
         activeTurnJob = scope.launch {
-            val settings = prefs.settings.first()
-            val detected = LanguageDetector.detect(transcript, settings.voiceLanguage)
-            _uiState.update {
-                it.copy(
-                    orbState = OrbState.THINKING,
-                    liveTranscript = transcript,
-                    detectedLanguage = detected,
-                    lastReply = "",
-                    statusBanner = "Thinking (${detected.label})..."
-                )
-            }
-
-            tts.configure(settings.activeVoice, settings.voiceRate, settings.voicePitch, detected)
-
-            // 1. Check Fast-Path / Agent Automation first
-            val agentResult = agentLoop.tryExecuteCommand(transcript)
-            if (agentResult != null) {
+            try {
+                val settings = prefs.settings.first()
+                val detected = LanguageDetector.detect(transcript, settings.voiceLanguage)
                 _uiState.update {
                     it.copy(
-                        orbState = OrbState.SPEAKING,
-                        lastReply = agentResult,
-                        statusBanner = "Speaking agent result..."
+                        orbState = OrbState.THINKING,
+                        liveTranscript = transcript,
+                        detectedLanguage = detected,
+                        lastReply = "",
+                        statusBanner = "Thinking (${detected.label})..."
                     )
                 }
-                tts.speakImmediate(agentResult, settings.activeVoice)
-                _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Ready") }
-                return@launch
-            }
 
-            // 2. Realtime WebSocket path if toggled
-            if (settings.realtimeWebSocketEnabled && realtimeWs.connect(settings.personaPrompt)) {
-                realtimeWs.sendUserTurn(transcript)
-                _uiState.update { it.copy(orbState = OrbState.SPEAKING, statusBanner = "Realtime WebSocket active") }
-                realtimeWs.events.collect { delta ->
-                    if (delta == "[DONE]") {
-                        tts.flushRemaining()
-                        _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Ready") }
-                        return@collect
-                    } else if (delta.startsWith("[ERROR]")) {
-                        _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = delta) }
-                        return@collect
-                    } else {
-                        _uiState.update { it.copy(lastReply = it.lastReply + delta) }
-                        tts.streamTokenChunk(delta)
-                    }
-                }
-                return@launch
-            }
+                tts.configure(settings.activeVoice, settings.voiceRate, settings.voicePitch, detected)
 
-            // 3. Standard Streaming AI Router -> Sentence-chunked TTS
-            val replyBuilder = StringBuilder()
-            var switchedToSpeaking = false
-            aiRouter.routeAndStream(
-                history = listOf(LlmMessage("user", transcript)),
-                userInput = transcript
-            ).collect { chunk ->
-                if (chunk.error != null) {
+                // 1. Check Fast-Path / Agent Automation first
+                val agentResult = agentLoop.tryExecuteCommand(transcript)
+                if (agentResult != null) {
                     _uiState.update {
                         it.copy(
-                            orbState = OrbState.IDLE,
-                            lastReply = chunk.error,
-                            statusBanner = chunk.error
+                            orbState = OrbState.SPEAKING,
+                            lastReply = agentResult,
+                            statusBanner = "Speaking agent result..."
                         )
                     }
+                    tts.speakImmediate(agentResult, settings.activeVoice)
+                    _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Ready") }
+                    return@launch
                 }
-                if (chunk.delta.isNotEmpty()) {
-                    if (!switchedToSpeaking) {
-                        switchedToSpeaking = true
-                        _uiState.update { it.copy(orbState = OrbState.SPEAKING, statusBanner = "Speaking...") }
+
+                // 2. Realtime WebSocket path if toggled
+                if (settings.realtimeWebSocketEnabled && realtimeWs.connect(settings.personaPrompt)) {
+                    realtimeWs.sendUserTurn(transcript)
+                    _uiState.update { it.copy(orbState = OrbState.SPEAKING, statusBanner = "Realtime WebSocket active") }
+                    realtimeWs.events.collect { delta ->
+                        if (delta == "[DONE]") {
+                            tts.flushRemaining()
+                            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Ready") }
+                            return@collect
+                        } else if (delta.startsWith("[ERROR]")) {
+                            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = delta) }
+                            _errors.tryEmit(delta)
+                            return@collect
+                        } else {
+                            _uiState.update { it.copy(lastReply = it.lastReply + delta) }
+                            tts.streamTokenChunk(delta)
+                        }
                     }
-                    replyBuilder.append(chunk.delta)
-                    _uiState.update { it.copy(lastReply = replyBuilder.toString()) }
-                    tts.streamTokenChunk(chunk.delta)
+                    return@launch
                 }
-                if (chunk.completed) {
-                    tts.flushRemaining()
-                    _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Ready (${chunk.modelUsed})") }
+
+                // 3. Standard Streaming AI Router -> Sentence-chunked TTS
+                val replyBuilder = StringBuilder()
+                var switchedToSpeaking = false
+                aiRouter.routeAndStream(
+                    history = listOf(LlmMessage("user", transcript)),
+                    userInput = transcript
+                ).collect { chunk ->
+                    if (chunk.error != null) {
+                        _uiState.update {
+                            it.copy(
+                                orbState = OrbState.IDLE,
+                                lastReply = chunk.error,
+                                statusBanner = chunk.error
+                            )
+                        }
+                        _errors.tryEmit(chunk.error)
+                    }
+                    if (chunk.delta.isNotEmpty()) {
+                        if (!switchedToSpeaking) {
+                            switchedToSpeaking = true
+                            _uiState.update { it.copy(orbState = OrbState.SPEAKING, statusBanner = "Speaking...") }
+                        }
+                        replyBuilder.append(chunk.delta)
+                        _uiState.update { it.copy(lastReply = replyBuilder.toString()) }
+                        tts.streamTokenChunk(chunk.delta)
+                    }
+                    if (chunk.completed) {
+                        tts.flushRemaining()
+                        _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Ready (${chunk.modelUsed})") }
+                    }
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val msg = e.message ?: "Voice assistant error"
+                runCatching { vad.stopMonitoring() }
+                runCatching { tts.stop() }
+                _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = msg) }
+                _errors.tryEmit(msg)
             }
         }
     }

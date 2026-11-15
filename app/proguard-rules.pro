@@ -3,6 +3,7 @@
 # =====================================================================
 -keepattributes SourceFile,LineNumberTable
 -keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,Exceptions
+-keepattributes RuntimeVisibleAnnotations,RuntimeVisibleParameterAnnotations,RuntimeInvisibleAnnotations
 -keep class kotlin.Metadata { *; }
 
 # Keep native JNI method names intact
@@ -20,12 +21,16 @@
 # =====================================================================
 -keep class * extends androidx.room.RoomDatabase { *; }
 -keep class * extends androidx.room.RoomDatabase$Callback { *; }
+-keep class * extends androidx.room.RoomOpenHelper$Delegate { *; }
 -keep class com.zehn.assistant.data.db.ZehnDatabase_Impl { *; }
 -keep class com.zehn.assistant.data.db.** { *; }
 -keep @androidx.room.Entity class * { *; }
 -keep @androidx.room.Dao interface * { *; }
 -keepclassmembers class * extends androidx.room.RoomDatabase {
     void <init>(...);
+}
+-keepclassmembers class * {
+    @androidx.room.TypeConverter <methods>;
 }
 -dontwarn androidx.room.paging.**
 
@@ -49,8 +54,10 @@
 }
 -keep class com.zehn.assistant.**_Factory { *; }
 -keep class com.zehn.assistant.**_MembersInjector { *; }
+-keep class com.zehn.assistant.**_GeneratedInjector { *; }
 -keep class com.zehn.assistant.**_HiltModules* { *; }
 -keep class com.zehn.assistant.Hilt_* { *; }
+-keep class com.zehn.assistant.Dagger* { *; }
 -keep class dagger.hilt.internal.aggregateddeps.** { *; }
 -keep class hilt_aggregated_deps.** { *; }
 -dontwarn dagger.hilt.**
@@ -82,12 +89,14 @@
 -keep class com.google.ai.edge.localagents.** { *; }
 -keep class com.google.mediapipe.tasks.genai.** { *; }
 -keep class com.google.mediapipe.framework.** { *; }
+-keep class com.google.android.gms.tflite.** { *; }
 -keep class org.tensorflow.lite.** { *; }
 
 -dontwarn com.google.ai.edge.litertlm.**
 -dontwarn com.google.ai.edge.litert.**
 -dontwarn com.google.ai.edge.localagents.**
 -dontwarn com.google.mediapipe.**
+-dontwarn com.google.android.gms.tflite.**
 -dontwarn org.tensorflow.lite.**
 
 # =====================================================================
@@ -116,6 +125,8 @@
 # Kotlinx Serialization & Enums
 # =====================================================================
 -dontnote kotlinx.serialization.AnnotationsKt
+-keep class kotlinx.serialization.KSerializer { *; }
+-keep class kotlinx.serialization.descriptors.SerialDescriptor { *; }
 -keepclassmembers class kotlinx.serialization.json.** {
     *** Companion;
 }
@@ -125,6 +136,9 @@
 -keep,includedescriptorclasses class com.zehn.assistant.**$$serializer { *; }
 -keepclassmembers class com.zehn.assistant.** {
     *** Companion;
+}
+-keepclassmembers class com.zehn.assistant.**$Companion {
+    kotlinx.serialization.KSerializer serializer(...);
 }
 -keep @kotlinx.serialization.Serializable class com.zehn.assistant.** { *; }
 -keepclassmembers @kotlinx.serialization.Serializable class com.zehn.assistant.** { *; }
