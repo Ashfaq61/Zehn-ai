@@ -1,0 +1,384 @@
+package com.zehn.assistant
+
+import android.content.Intent
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.zehn.assistant.data.model.OrbState
+import com.zehn.assistant.ui.ZehnViewModel
+import com.zehn.assistant.ui.components.CameraVisionDialog
+import com.zehn.assistant.ui.components.ClayActionButton
+import com.zehn.assistant.ui.components.ClayGlassCard
+import com.zehn.assistant.ui.components.LocalZehnHapticsEnabled
+import com.zehn.assistant.ui.components.NotchedBottomNavBar
+import com.zehn.assistant.ui.screens.AccountScreen
+import com.zehn.assistant.ui.screens.ApiKeysScreen
+import com.zehn.assistant.ui.screens.ChatScreen
+import com.zehn.assistant.ui.screens.ConversationsScreen
+import com.zehn.assistant.ui.screens.HomeScreen
+import com.zehn.assistant.ui.screens.HubScreen
+import com.zehn.assistant.ui.screens.MemoryScreen
+import com.zehn.assistant.ui.screens.MissionModeScreen
+import com.zehn.assistant.ui.screens.OnboardingScreen
+import com.zehn.assistant.ui.screens.OrbScreen
+import com.zehn.assistant.ui.screens.PermissionsScreen
+import com.zehn.assistant.ui.screens.SecurityScreen
+import com.zehn.assistant.ui.screens.SettingsScreen
+import com.zehn.assistant.ui.screens.SkillsScreen
+import com.zehn.assistant.ui.screens.TouchGuardScreen
+import com.zehn.assistant.ui.screens.TriggersScreen
+import com.zehn.assistant.ui.screens.UpdateScreen
+import com.zehn.assistant.ui.screens.VoiceAndAiModelsScreen
+import com.zehn.assistant.ui.theme.ZehnColors
+import com.zehn.assistant.ui.theme.ZehnTheme
+import com.zehn.assistant.voice.WakeWordService
+import dagger.hilt.android.AndroidEntryPoint
+
+@AndroidEntryPoint
+class MainActivity : ComponentActivity() {
+
+    private var launchIntoOrb by mutableStateOf(false)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        checkAssistIntent(intent)
+
+        setContent {
+            ZehnTheme {
+                ZehnRootApp(
+                    initialOpenOrb = launchIntoOrb,
+                    onConsumeOrbTrigger = { launchIntoOrb = false }
+                )
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        checkAssistIntent(intent)
+    }
+
+    private fun checkAssistIntent(intent: Intent?) {
+        val action = intent?.action
+        if (action == WakeWordService.ACTION_TRIGGER_ORB ||
+            action == Intent.ACTION_ASSIST ||
+            action == Intent.ACTION_VOICE_COMMAND
+        ) {
+            launchIntoOrb = true
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ZehnRootApp(
+    initialOpenOrb: Boolean,
+    onConsumeOrbTrigger: () -> Unit,
+    vm: ZehnViewModel = hiltViewModel()
+) {
+    val settings by vm.settings.collectAsStateWithLifecycle()
+    val voiceState by vm.voiceUiState.collectAsStateWithLifecycle()
+    val pendingConfirm by vm.pendingConfirmation.collectAsStateWithLifecycle()
+    val banner by vm.toastBanner.collectAsStateWithLifecycle()
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(banner) {
+        if (!banner.isNullOrBlank()) {
+            snackbarHostState.showSnackbar(banner!!)
+            vm.clearBanner()
+        }
+    }
+
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var activeSubRoute by rememberSaveable { mutableStateOf<String?>(null) }
+    var showChatBottomSheet by remember { mutableStateOf(false) }
+    var showCameraDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(initialOpenOrb) {
+        if (initialOpenOrb) {
+            activeSubRoute = "orb"
+            onConsumeOrbTrigger()
+        }
+    }
+
+    if (activeSubRoute != null) {
+        BackHandler { activeSubRoute = null }
+    }
+
+    CompositionLocalProvider(LocalZehnHapticsEnabled provides settings.hapticFeedbackEnabled) {
+        if (!settings.onboardingCompleted) {
+            OnboardingScreen(
+                safetyPolicy = vm.safetyPolicy,
+                onFinish = { vm.completeOnboarding() }
+            )
+            return@CompositionLocalProvider
+        }
+
+        val tabStateHolder = rememberSaveableStateHolder()
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(ZehnColors.Background)
+        ) {
+            // Content area draws edge-to-edge behind the floating notched navbar
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.statusBars)
+            ) {
+                if (activeSubRoute != null && activeSubRoute != "orb") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { activeSubRoute = null }) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = ZehnColors.Cyan
+                            )
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = routeTitle(activeSubRoute!!),
+                            style = MaterialTheme.typography.titleMedium,
+                            color = ZehnColors.SlateMuted
+                        )
+                    }
+                }
+
+                Box(modifier = Modifier.weight(1f)) {
+                    AnimatedContent(
+                        targetState = activeSubRoute ?: "tab_$selectedTab",
+                        transitionSpec = {
+                            (fadeIn(spring(stiffness = Spring.StiffnessMediumLow)) +
+                                scaleIn(initialScale = 0.97f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)))
+                                .togetherWith(fadeOut(spring(stiffness = Spring.StiffnessMedium)))
+                        },
+                        label = "zehn_screen_transition"
+                    ) { routeKey ->
+                        when (routeKey) {
+                            "tab_0" -> tabStateHolder.SaveableStateProvider("tab_0") {
+                                HomeScreen(
+                                    vm = vm,
+                                    onOpenOrb = { activeSubRoute = "orb" },
+                                    onOpenChatSheet = { showChatBottomSheet = true },
+                                    onOpenMission = { activeSubRoute = "mission" },
+                                    onOpenModels = { activeSubRoute = "voice_models" },
+                                    onOpenSecurity = { activeSubRoute = "security" },
+                                    onOpenCamera = { showCameraDialog = true }
+                                )
+                            }
+                            "tab_1" -> tabStateHolder.SaveableStateProvider("tab_1") {
+                                ChatScreen(
+                                    vm = vm,
+                                    isBottomSheet = false,
+                                    onOpenConversations = { activeSubRoute = "conversations" },
+                                    onOpenCamera = { showCameraDialog = true }
+                                )
+                            }
+                            "tab_2" -> tabStateHolder.SaveableStateProvider("tab_2") {
+                                TriggersScreen(vm = vm)
+                            }
+                            "tab_3" -> tabStateHolder.SaveableStateProvider("tab_3") {
+                                HubScreen(onNavigate = { dest -> activeSubRoute = dest })
+                            }
+                            "orb" -> OrbScreen(vm = vm, onBack = { activeSubRoute = null })
+                            "voice_models" -> VoiceAndAiModelsScreen(vm = vm)
+                            "skills" -> SkillsScreen(vm = vm)
+                            "memory" -> MemoryScreen(vm = vm)
+                            "security" -> SecurityScreen(vm = vm)
+                            "touch_guard" -> TouchGuardScreen(vm = vm)
+                            "mission" -> MissionModeScreen(vm = vm)
+                            "permissions" -> PermissionsScreen(vm = vm)
+                            "api_keys" -> ApiKeysScreen(vm = vm)
+                            "conversations" -> ConversationsScreen(vm = vm) {
+                                activeSubRoute = null
+                                selectedTab = 1
+                            }
+                            "settings" -> SettingsScreen(vm = vm)
+                            "update" -> UpdateScreen(vm = vm)
+                            "account" -> AccountScreen(vm = vm)
+                        }
+                    }
+                }
+            }
+
+            // Snackbar feedback
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 112.dp, start = 16.dp, end = 16.dp)
+            )
+
+            // Floating Notched Bottom Navbar (edge-to-edge transparent behind it)
+            NotchedBottomNavBar(
+                selectedTabIndex = if (activeSubRoute == null) selectedTab else -1,
+                orbState = voiceState.orbState,
+                onSelectTab = { idx ->
+                    activeSubRoute = null
+                    selectedTab = idx
+                },
+                onMicClick = {
+                    activeSubRoute = "orb"
+                    if (voiceState.orbState == OrbState.IDLE) {
+                        vm.voiceCoordinator.startVoiceTurn()
+                    } else {
+                        vm.voiceCoordinator.bargeIn()
+                    }
+                },
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
+
+            // Draggable Chat Bottom Sheet
+            if (showChatBottomSheet) {
+                val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+                ModalBottomSheet(
+                    onDismissRequest = { showChatBottomSheet = false },
+                    sheetState = sheetState,
+                    containerColor = ZehnColors.SurfaceClay,
+                    shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+                ) {
+                    Box(modifier = Modifier.fillMaxWidth().fillMaxHeight(0.84f)) {
+                        ChatScreen(
+                            vm = vm,
+                            isBottomSheet = true,
+                            onOpenConversations = {
+                                showChatBottomSheet = false
+                                activeSubRoute = "conversations"
+                            },
+                            onOpenCamera = { showCameraDialog = true }
+                        )
+                    }
+                }
+            }
+
+            // CameraX + ML Kit OCR/QR Dialog
+            if (showCameraDialog) {
+                CameraVisionDialog(
+                    onDismiss = { showCameraDialog = false },
+                    onCapturedPhoto = { uri ->
+                        selectedTab = 1
+                        activeSubRoute = null
+                        vm.sendChatMessage("Analyze this camera image carefully.", attachedImageUri = uri)
+                    },
+                    onScannedOcrOrQr = { scanned ->
+                        selectedTab = 1
+                        activeSubRoute = null
+                        vm.sendChatMessage("Process this scanned text/QR:\n$scanned")
+                    }
+                )
+            }
+
+            // Mandatory Safety Confirmation Modal (Payments, Calls, Messages, Deletes, Social ToS)
+            pendingConfirm?.let { req ->
+                AlertDialog(
+                    onDismissRequest = { vm.safetyPolicy.resolveConfirmation(false) },
+                    containerColor = ZehnColors.SurfaceClay,
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.Warning, contentDescription = null, tint = ZehnColors.Amber)
+                            Spacer(Modifier.width(8.dp))
+                            Text(req.title, color = ZehnColors.FrostWhite)
+                        }
+                    },
+                    text = {
+                        Column {
+                            Text(req.detail, color = ZehnColors.FrostWhite)
+                            if (!req.warningBanner.isNullOrBlank()) {
+                                Spacer(Modifier.height(10.dp))
+                                ClayGlassCard {
+                                    Text(req.warningBanner, color = ZehnColors.Amber, style = MaterialTheme.typography.bodyMedium)
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        ClayActionButton(text = "Confirm", onClick = { vm.safetyPolicy.resolveConfirmation(true) })
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { vm.safetyPolicy.resolveConfirmation(false) }) {
+                            Text("Cancel", color = Color(0xFFFB7185))
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+private fun routeTitle(route: String): String = when (route) {
+    "orb" -> "Voice Orb"
+    "voice_models" -> "Voice & AI Models"
+    "skills" -> "Skills"
+    "memory" -> "Memory & RAG"
+    "security" -> "Security"
+    "touch_guard" -> "Touch Guard"
+    "mission" -> "Mission Mode"
+    "permissions" -> "Permissions"
+    "api_keys" -> "API Keys"
+    "conversations" -> "Conversations"
+    "settings" -> "Settings"
+    "update" -> "Update"
+    "account" -> "Account"
+    else -> "Zehn AI"
+}
