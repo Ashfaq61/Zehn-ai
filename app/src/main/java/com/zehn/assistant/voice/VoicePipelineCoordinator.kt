@@ -1,9 +1,12 @@
 package com.zehn.assistant.voice
 
 import com.zehn.assistant.agent.AgentLoop
+import com.zehn.assistant.agent.CameraLaunchRequest
 import com.zehn.assistant.ai.AiEngineRouter
 import com.zehn.assistant.ai.LlmMessage
 import com.zehn.assistant.data.PreferencesRepository
+import com.zehn.assistant.data.ZehnSettings
+import com.zehn.assistant.data.model.AiExecutionMode
 import com.zehn.assistant.data.model.OrbState
 import com.zehn.assistant.data.model.VoiceLanguage
 import com.zehn.assistant.data.model.VoiceProfile
@@ -13,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -31,8 +35,18 @@ data class VoicePipelineUiState(
     val liveTranscript: String = "",
     val lastReply: String = "",
     val detectedLanguage: VoiceLanguage = VoiceLanguage.ENGLISH,
-    val statusBanner: String = "Tap the glowing orb or say \"Hey Zehn\""
+    val statusBanner: String = "Tap the glowing orb or say \"Hey Zehn\"",
+    val activeLiveModel: String = "",
+    val liveModeActive: Boolean = false,
+    val continuousModeActive: Boolean = false
 )
+
+sealed class LiveChatTranscriptEvent {
+    data class InputDraft(val text: String) : LiveChatTranscriptEvent()
+    data class OutputDraft(val text: String) : LiveChatTranscriptEvent()
+    data class CommittedTurn(val role: String, val content: String, val modelUsed: String) : LiveChatTranscriptEvent()
+    data object ClearDrafts : LiveChatTranscriptEvent()
+}
 
 @Singleton
 class VoicePipelineCoordinator @Inject constructor(
@@ -40,6 +54,7 @@ class VoicePipelineCoordinator @Inject constructor(
     private val stt: AndroidSttEngine,
     private val tts: SentenceStreamingTtsEngine,
     private val realtimeWs: RealtimeWebSocketClient,
+    private val geminiLive: GeminiLiveAudioClient,
     private val aiRouter: AiEngineRouter,
     private val agentLoop: AgentLoop,
     private val prefs: PreferencesRepository,
@@ -47,21 +62,34 @@ class VoicePipelineCoordinator @Inject constructor(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var activeTurnJob: Job? = null
+    private var classicRetryCount = 0
 
     private val _uiState = MutableStateFlow(VoicePipelineUiState())
     val uiState: StateFlow<VoicePipelineUiState> = _uiState.asStateFlow()
 
-    private val _errors = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    private val _errors = MutableSharedFlow<String>(extraBufferCapacity = 12)
     val errors: SharedFlow<String> = _errors.asSharedFlow()
+
+    private val _liveChatEvents = MutableSharedFlow<LiveChatTranscriptEvent>(extraBufferCapacity = 32)
+    val liveChatEvents: SharedFlow<LiveChatTranscriptEvent> = _liveChatEvents.asSharedFlow()
+
+    val liveModelsDiscovery: StateFlow<LiveModelsDiscoveryState> = geminiLive.discoveryState
+    val cameraLaunchRequests: SharedFlow<CameraLaunchRequest> = agentLoop.cameraLaunchRequests
 
     init {
         scope.launch {
+            prefs.settings.collect { s ->
+                _uiState.update { it.copy(continuousModeActive = s.continuousConversationEnabled) }
+            }
+        }
+        scope.launch {
             try {
                 vad.micLevel.collect { level ->
-                    _uiState.update { it.copy(micLevel = level) }
-                    // Barge-in: if user speaks loudly while Zehn is speaking, interrupt immediately
-                    if (_uiState.value.orbState == OrbState.SPEAKING && level > 0.62f) {
-                        bargeIn()
+                    if (!_uiState.value.liveModeActive) {
+                        _uiState.update { it.copy(micLevel = level) }
+                        if (_uiState.value.orbState == OrbState.SPEAKING && level > 0.62f) {
+                            bargeIn()
+                        }
                     }
                 }
             } catch (e: CancellationException) {
@@ -73,7 +101,7 @@ class VoicePipelineCoordinator @Inject constructor(
         scope.launch {
             try {
                 stt.partialTranscript.collect { partial ->
-                    if (partial.isNotBlank()) {
+                    if (!_uiState.value.liveModeActive && partial.isNotBlank()) {
                         _uiState.update { it.copy(liveTranscript = partial) }
                     }
                 }
@@ -81,6 +109,157 @@ class VoicePipelineCoordinator @Inject constructor(
                 throw e
             } catch (e: Exception) {
                 _errors.tryEmit(e.message ?: "Speech transcript listener failed")
+            }
+        }
+        scope.launch {
+            try {
+                geminiLive.events.collect { ev ->
+                    handleGeminiLiveEvent(ev)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _errors.tryEmit(e.message ?: "Gemini Live listener error")
+            }
+        }
+    }
+
+    suspend fun refreshAvailableLiveModels() = geminiLive.discoverAvailableLiveModels()
+
+    private fun handleGeminiLiveEvent(ev: GeminiLiveEvent) {
+        when (ev) {
+            is GeminiLiveEvent.TryingModel -> {
+                val msg = if (ev.isFallback) {
+                    "Trying fallback Live model: ${ev.modelId}..."
+                } else {
+                    "Connecting Gemini Live: ${ev.modelId}..."
+                }
+                _uiState.update {
+                    it.copy(
+                        orbState = OrbState.THINKING,
+                        activeLiveModel = ev.modelId,
+                        liveModeActive = true,
+                        statusBanner = msg
+                    )
+                }
+                if (ev.isFallback) _errors.tryEmit(msg)
+            }
+
+            is GeminiLiveEvent.Connected -> {
+                val msg = if (ev.resumed) "Resumed Gemini Live (${ev.modelId})" else "Gemini Live active: ${ev.modelId}"
+                _uiState.update {
+                    it.copy(
+                        orbState = OrbState.LISTENING,
+                        activeLiveModel = ev.modelId,
+                        liveModeActive = true,
+                        statusBanner = msg
+                    )
+                }
+                if (ev.resumed) _errors.tryEmit(msg)
+            }
+
+            is GeminiLiveEvent.AudioLevel -> {
+                if (_uiState.value.liveModeActive) {
+                    _uiState.update { it.copy(micLevel = ev.micLevel) }
+                }
+            }
+
+            is GeminiLiveEvent.PlaybackState -> {
+                if (_uiState.value.liveModeActive) {
+                    _uiState.update {
+                        it.copy(
+                            orbState = if (ev.isPlaying) OrbState.SPEAKING else OrbState.LISTENING,
+                            statusBanner = if (ev.isPlaying) {
+                                "Speaking (${it.activeLiveModel})..."
+                            } else {
+                                "Listening (${it.activeLiveModel})..."
+                            }
+                        )
+                    }
+                }
+            }
+
+            is GeminiLiveEvent.InputTranscript -> {
+                _uiState.update { it.copy(liveTranscript = ev.text) }
+                val lower = ev.text.trim().lowercase()
+                if (lower == "stop" || lower == "band karo" || lower == "ruk jao") {
+                    safetyPolicy.triggerEmergencyStop()
+                    stopAll()
+                    return
+                }
+                if (ev.isTurnFinal) {
+                    val modelTag = _uiState.value.activeLiveModel.ifBlank { "Gemini Live" }
+                    _liveChatEvents.tryEmit(LiveChatTranscriptEvent.InputDraft(""))
+                    _liveChatEvents.tryEmit(
+                        LiveChatTranscriptEvent.CommittedTurn("user", ev.text, "Live Audio ($modelTag)")
+                    )
+                } else {
+                    _liveChatEvents.tryEmit(LiveChatTranscriptEvent.InputDraft(ev.text))
+                }
+            }
+
+            is GeminiLiveEvent.OutputTranscript -> {
+                _uiState.update { it.copy(lastReply = ev.text) }
+                if (ev.isTurnFinal) {
+                    val modelTag = _uiState.value.activeLiveModel.ifBlank { "Gemini Live" }
+                    _liveChatEvents.tryEmit(LiveChatTranscriptEvent.OutputDraft(""))
+                    _liveChatEvents.tryEmit(
+                        LiveChatTranscriptEvent.CommittedTurn("assistant", ev.text, modelTag)
+                    )
+                } else {
+                    _liveChatEvents.tryEmit(LiveChatTranscriptEvent.OutputDraft(ev.text))
+                }
+            }
+
+            is GeminiLiveEvent.ToolAction -> {
+                _uiState.update { it.copy(statusBanner = "Live tool: ${ev.name}") }
+                _liveChatEvents.tryEmit(
+                    LiveChatTranscriptEvent.CommittedTurn(
+                        role = "assistant",
+                        content = "[Tool: ${ev.name}] ${ev.summary}",
+                        modelUsed = "Zehn Live Agent"
+                    )
+                )
+            }
+
+            is GeminiLiveEvent.StatusNotice -> {
+                _uiState.update { it.copy(statusBanner = ev.message) }
+                _errors.tryEmit(ev.message)
+            }
+
+            is GeminiLiveEvent.Failed -> {
+                _liveChatEvents.tryEmit(LiveChatTranscriptEvent.ClearDrafts)
+                _uiState.update {
+                    it.copy(
+                        liveModeActive = false,
+                        activeLiveModel = "",
+                        orbState = OrbState.IDLE,
+                        micLevel = 0f,
+                        statusBanner = ev.reason
+                    )
+                }
+                _errors.tryEmit(ev.reason)
+                if (ev.shouldFallbackToClassic && !safetyPolicy.policy.value.emergencyStopped) {
+                    scope.launch {
+                        runCatching {
+                            val settings = prefs.settings.first()
+                            startClassicVoiceTurn(settings)
+                        }
+                    }
+                }
+            }
+
+            is GeminiLiveEvent.SessionEnded -> {
+                _liveChatEvents.tryEmit(LiveChatTranscriptEvent.ClearDrafts)
+                _uiState.update {
+                    it.copy(
+                        liveModeActive = false,
+                        activeLiveModel = "",
+                        orbState = OrbState.IDLE,
+                        micLevel = 0f,
+                        statusBanner = "Live session ended"
+                    )
+                }
             }
         }
     }
@@ -93,48 +272,100 @@ class VoicePipelineCoordinator @Inject constructor(
                 _errors.tryEmit(msg)
                 return
             }
-            // Barge-in if currently speaking or thinking
+
+            if (geminiLive.isSessionActive.value) {
+                if (_uiState.value.orbState == OrbState.SPEAKING) {
+                    bargeIn()
+                } else {
+                    stopAll()
+                }
+                return
+            }
+
             if (_uiState.value.orbState == OrbState.SPEAKING || _uiState.value.orbState == OrbState.THINKING) {
                 bargeIn()
             }
 
+            classicRetryCount = 0
             scope.launch {
                 try {
                     val settings = prefs.settings.first()
-                    _uiState.update {
-                        it.copy(
-                            orbState = OrbState.LISTENING,
-                            liveTranscript = "",
-                            statusBanner = "Listening (${settings.voiceLanguage.label})..."
-                        )
-                    }
-                    vad.startMonitoring(settings.vadEngine)
-                    stt.startListening(
-                        language = settings.voiceLanguage,
-                        engineType = settings.sttEngine,
-                        onFinalResult = { transcript ->
-                            runCatching { vad.stopMonitoring() }
-                            processSpokenQuery(transcript)
-                        },
-                        onError = { err ->
-                            runCatching { vad.stopMonitoring() }
-                            _uiState.update {
-                                it.copy(orbState = OrbState.IDLE, statusBanner = err)
-                            }
-                            _errors.tryEmit(err)
+                    if (settings.geminiLiveVoiceEnabled && settings.executionMode != AiExecutionMode.OFFLINE) {
+                        _uiState.update {
+                            it.copy(
+                                orbState = OrbState.THINKING,
+                                liveTranscript = "",
+                                lastReply = "",
+                                liveModeActive = true,
+                                statusBanner = "Connecting Gemini Live..."
+                            )
                         }
-                    )
+                        geminiLive.startLiveSession(
+                            personaPrompt = settings.personaPrompt,
+                            voiceProfile = settings.activeVoice,
+                            preferredModel = settings.geminiLiveModel,
+                            fallbackModel = settings.geminiLiveFallbackModel,
+                            customModel = settings.geminiLiveCustomModel
+                        )
+                    } else {
+                        startClassicVoiceTurn(settings)
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     runCatching { vad.stopMonitoring() }
                     val msg = e.message ?: "Voice capture error"
-                    _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = msg) }
+                    _uiState.update { it.copy(orbState = OrbState.IDLE, liveModeActive = false, statusBanner = msg) }
                     _errors.tryEmit(msg)
                 }
             }
         } catch (e: Exception) {
             val msg = e.message ?: "Unable to start voice pipeline"
+            _uiState.update { it.copy(orbState = OrbState.IDLE, liveModeActive = false, statusBanner = msg) }
+            _errors.tryEmit(msg)
+        }
+    }
+
+    private fun startClassicVoiceTurn(settings: ZehnSettings) {
+        try {
+            if (safetyPolicy.policy.value.emergencyStopped) return
+            _uiState.update {
+                it.copy(
+                    orbState = OrbState.LISTENING,
+                    liveModeActive = false,
+                    activeLiveModel = "Classic STT/LLM/TTS",
+                    liveTranscript = "",
+                    statusBanner = "Listening (${settings.voiceLanguage.label})..."
+                )
+            }
+            vad.startMonitoring(settings.vadEngine)
+            stt.startListening(
+                language = settings.voiceLanguage,
+                engineType = settings.sttEngine,
+                onFinalResult = { transcript ->
+                    classicRetryCount = 0
+                    runCatching { vad.stopMonitoring() }
+                    processSpokenQuery(transcript)
+                },
+                onError = { err ->
+                    runCatching { vad.stopMonitoring() }
+                    val isTransient = err.contains("No speech recognized", true) || err.contains("timed out", true)
+                    if (isTransient && classicRetryCount < 1 && !safetyPolicy.policy.value.emergencyStopped && settings.continuousConversationEnabled) {
+                        classicRetryCount++
+                        _uiState.update { it.copy(statusBanner = "Re-listening automatically...") }
+                        scope.launch {
+                            delay(350)
+                            startClassicVoiceTurn(settings)
+                        }
+                    } else {
+                        _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = err) }
+                        _errors.tryEmit(err)
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            runCatching { vad.stopMonitoring() }
+            val msg = e.message ?: "Classic voice capture error"
             _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = msg) }
             _errors.tryEmit(msg)
         }
@@ -142,6 +373,30 @@ class VoicePipelineCoordinator @Inject constructor(
 
     fun bargeIn() {
         try {
+            if (geminiLive.isSessionActive.value) {
+                if (_uiState.value.orbState == OrbState.SPEAKING) {
+                    geminiLive.interruptPlaybackImmediate()
+                    _uiState.update {
+                        it.copy(
+                            orbState = OrbState.LISTENING,
+                            statusBanner = "Interrupted (Barge-in) — listening..."
+                        )
+                    }
+                } else {
+                    geminiLive.stopSession()
+                    _liveChatEvents.tryEmit(LiveChatTranscriptEvent.ClearDrafts)
+                    _uiState.update {
+                        it.copy(
+                            orbState = OrbState.IDLE,
+                            liveModeActive = false,
+                            activeLiveModel = "",
+                            statusBanner = "Interrupted (Barge-in)"
+                        )
+                    }
+                }
+                return
+            }
+
             activeTurnJob?.cancel()
             tts.stop()
             stt.stopListening()
@@ -155,15 +410,24 @@ class VoicePipelineCoordinator @Inject constructor(
 
     fun stopAll() {
         try {
+            geminiLive.stopSession()
+            _liveChatEvents.tryEmit(LiveChatTranscriptEvent.ClearDrafts)
             activeTurnJob?.cancel()
             vad.stopMonitoring()
             stt.stopListening()
             tts.stop()
             realtimeWs.disconnect()
-            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Stopped") }
+            _uiState.update {
+                it.copy(
+                    orbState = OrbState.IDLE,
+                    liveModeActive = false,
+                    activeLiveModel = "",
+                    statusBanner = "Stopped"
+                )
+            }
         } catch (e: Exception) {
             val msg = e.message ?: "Failed to stop voice pipeline cleanly"
-            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = msg) }
+            _uiState.update { it.copy(orbState = OrbState.IDLE, liveModeActive = false, statusBanner = msg) }
             _errors.tryEmit(msg)
         }
     }
@@ -186,7 +450,17 @@ class VoicePipelineCoordinator @Inject constructor(
         activeTurnJob = scope.launch {
             try {
                 val settings = prefs.settings.first()
+                val lower = transcript.trim().lowercase()
+                if (lower == "stop" || lower == "band karo" || lower == "ruk jao") {
+                    safetyPolicy.triggerEmergencyStop()
+                    stopAll()
+                    return@launch
+                }
+
                 val detected = LanguageDetector.detect(transcript, settings.voiceLanguage)
+                _liveChatEvents.tryEmit(
+                    LiveChatTranscriptEvent.CommittedTurn("user", transcript, "Voice STT")
+                )
                 _uiState.update {
                     it.copy(
                         orbState = OrbState.THINKING,
@@ -199,7 +473,6 @@ class VoicePipelineCoordinator @Inject constructor(
 
                 tts.configure(settings.activeVoice, settings.voiceRate, settings.voicePitch, detected)
 
-                // 1. Check Fast-Path / Agent Automation first
                 val agentResult = agentLoop.tryExecuteCommand(transcript)
                 if (agentResult != null) {
                     _uiState.update {
@@ -209,33 +482,41 @@ class VoicePipelineCoordinator @Inject constructor(
                             statusBanner = "Speaking agent result..."
                         )
                     }
+                    _liveChatEvents.tryEmit(
+                        LiveChatTranscriptEvent.CommittedTurn("assistant", agentResult, "Zehn Agent")
+                    )
                     tts.speakImmediate(agentResult, settings.activeVoice)
-                    _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Ready") }
+                    scheduleContinuousRelistenIfEnabled(settings)
                     return@launch
                 }
 
-                // 2. Realtime WebSocket path if toggled
                 if (settings.realtimeWebSocketEnabled && realtimeWs.connect(settings.personaPrompt)) {
                     realtimeWs.sendUserTurn(transcript)
                     _uiState.update { it.copy(orbState = OrbState.SPEAKING, statusBanner = "Realtime WebSocket active") }
+                    val wsReply = StringBuilder()
                     realtimeWs.events.collect { delta ->
                         if (delta == "[DONE]") {
                             tts.flushRemaining()
-                            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Ready") }
+                            if (wsReply.isNotEmpty()) {
+                                _liveChatEvents.tryEmit(
+                                    LiveChatTranscriptEvent.CommittedTurn("assistant", wsReply.toString(), "Realtime WS")
+                                )
+                            }
+                            scheduleContinuousRelistenIfEnabled(settings)
                             return@collect
                         } else if (delta.startsWith("[ERROR]")) {
                             _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = delta) }
                             _errors.tryEmit(delta)
                             return@collect
                         } else {
-                            _uiState.update { it.copy(lastReply = it.lastReply + delta) }
+                            wsReply.append(delta)
+                            _uiState.update { it.copy(lastReply = wsReply.toString()) }
                             tts.streamTokenChunk(delta)
                         }
                     }
                     return@launch
                 }
 
-                // 3. Standard Streaming AI Router -> Sentence-chunked TTS
                 val replyBuilder = StringBuilder()
                 var switchedToSpeaking = false
                 aiRouter.routeAndStream(
@@ -263,7 +544,12 @@ class VoicePipelineCoordinator @Inject constructor(
                     }
                     if (chunk.completed) {
                         tts.flushRemaining()
-                        _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = "Ready (${chunk.modelUsed})") }
+                        if (replyBuilder.isNotEmpty()) {
+                            _liveChatEvents.tryEmit(
+                                LiveChatTranscriptEvent.CommittedTurn("assistant", replyBuilder.toString(), chunk.modelUsed)
+                            )
+                        }
+                        scheduleContinuousRelistenIfEnabled(settings, "Ready (${chunk.modelUsed})")
                     }
                 }
             } catch (e: CancellationException) {
@@ -275,6 +561,24 @@ class VoicePipelineCoordinator @Inject constructor(
                 _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = msg) }
                 _errors.tryEmit(msg)
             }
+        }
+    }
+
+    private suspend fun scheduleContinuousRelistenIfEnabled(settings: ZehnSettings, idleBanner: String = "Ready") {
+        if (!settings.continuousConversationEnabled || safetyPolicy.policy.value.emergencyStopped) {
+            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = idleBanner) }
+            return
+        }
+        // Wait briefly for TTS speech drain before re-arming mic
+        var waitCycles = 0
+        while (tts.isSpeaking.value && waitCycles < 35) {
+            delay(200)
+            waitCycles++
+        }
+        if (!safetyPolicy.policy.value.emergencyStopped) {
+            startClassicVoiceTurn(settings)
+        } else {
+            _uiState.update { it.copy(orbState = OrbState.IDLE, statusBanner = idleBanner) }
         }
     }
 }

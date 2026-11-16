@@ -88,13 +88,16 @@ import com.zehn.assistant.ui.components.LocalZehnHapticsEnabled
 import com.zehn.assistant.ui.components.NotchedBottomNavBar
 import com.zehn.assistant.ui.screens.AccountScreen
 import com.zehn.assistant.ui.screens.ApiKeysScreen
+import com.zehn.assistant.ui.screens.CallAssistantScreen
 import com.zehn.assistant.ui.screens.ChatScreen
 import com.zehn.assistant.ui.screens.ConversationsScreen
+import com.zehn.assistant.ui.screens.DiagnosticsScreen
 import com.zehn.assistant.ui.screens.HomeScreen
 import com.zehn.assistant.ui.screens.HubScreen
 import com.zehn.assistant.ui.screens.MemoryScreen
 import com.zehn.assistant.ui.screens.MissionModeScreen
 import com.zehn.assistant.ui.screens.OnboardingScreen
+import com.zehn.assistant.ui.screens.OpenSourceDiscoveryScreen
 import com.zehn.assistant.ui.screens.OrbScreen
 import com.zehn.assistant.ui.screens.PermissionsScreen
 import com.zehn.assistant.ui.screens.SecurityScreen
@@ -181,6 +184,16 @@ fun ZehnRootApp(
     var activeSubRoute by rememberSaveable { mutableStateOf<String?>(null) }
     var showChatBottomSheet by remember { mutableStateOf(false) }
     var showCameraDialog by remember { mutableStateOf(false) }
+    var cameraStartFront by remember { mutableStateOf(false) }
+    var cameraStartVideo by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        vm.cameraLaunchRequests.collect { req ->
+            cameraStartFront = req.useFrontCamera
+            cameraStartVideo = req.isVideoMode
+            showCameraDialog = true
+        }
+    }
 
     LaunchedEffect(initialOpenOrb) {
         if (initialOpenOrb) {
@@ -296,6 +309,9 @@ fun ZehnRootApp(
                                 selectedTab = 1
                             }
                             "settings" -> SettingsScreen(vm = vm)
+                            "call_assistant" -> CallAssistantScreen(vm = vm)
+                            "open_source_discovery" -> OpenSourceDiscoveryScreen(vm = vm)
+                            "diagnostics" -> DiagnosticsScreen(vm = vm)
                             "update" -> UpdateScreen(vm = vm)
                             "account" -> AccountScreen(vm = vm)
                         }
@@ -357,10 +373,16 @@ fun ZehnRootApp(
                 }
             }
 
-            // CameraX + ML Kit OCR/QR Dialog
+            // CameraX + ML Kit OCR/QR/Photo/Video Dialog
             if (showCameraDialog) {
                 CameraVisionDialog(
-                    onDismiss = { showCameraDialog = false },
+                    initialUseFrontCamera = cameraStartFront,
+                    initialVideoMode = cameraStartVideo,
+                    onDismiss = {
+                        showCameraDialog = false
+                        cameraStartFront = false
+                        cameraStartVideo = false
+                    },
                     onCapturedPhoto = { uri ->
                         selectedTab = 1
                         activeSubRoute = null
@@ -370,7 +392,8 @@ fun ZehnRootApp(
                         selectedTab = 1
                         activeSubRoute = null
                         vm.sendChatMessage("Process this scanned text/QR:\n$scanned")
-                    }
+                    },
+                    onSavedMediaNotice = { notice -> vm.showBanner(notice) }
                 )
             }
 
@@ -423,6 +446,9 @@ private fun routeTitle(route: String): String = when (route) {
     "api_keys" -> "API Keys"
     "conversations" -> "Conversations"
     "settings" -> "Settings"
+    "call_assistant" -> "Call Assistant"
+    "open_source_discovery" -> "Open-Source Discovery"
+    "diagnostics" -> "System Diagnostics"
     "update" -> "Update"
     "account" -> "Account"
     else -> "Zehn AI"

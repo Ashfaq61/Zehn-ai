@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -66,6 +67,7 @@ import coil.compose.AsyncImage
 import com.zehn.assistant.ai.ProviderCatalog
 import com.zehn.assistant.data.model.AiExecutionMode
 import com.zehn.assistant.data.model.AiProvider
+import com.zehn.assistant.data.model.OrbState
 import com.zehn.assistant.ui.ZehnViewModel
 import com.zehn.assistant.ui.components.ClayActionButton
 import com.zehn.assistant.ui.components.ClayGlassCard
@@ -84,15 +86,22 @@ fun ChatScreen(
     val busy by vm.chatBusy.collectAsStateWithLifecycle()
     val projects by vm.projects.collectAsStateWithLifecycle()
     val selectedProjectId by vm.selectedProjectId.collectAsStateWithLifecycle()
+    val voiceState by vm.voiceUiState.collectAsStateWithLifecycle()
+    val liveInputDraft by vm.liveInputDraft.collectAsStateWithLifecycle()
+    val liveOutputDraft by vm.liveOutputDraft.collectAsStateWithLifecycle()
 
     var input by remember { mutableStateOf("") }
     var attachedImage by remember { mutableStateOf<Uri?>(null) }
     var showModelMenu by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
-    LaunchedEffect(messages.size, draft.length) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem((messages.size - 1).coerceAtLeast(0))
+    LaunchedEffect(messages.size, draft.length, liveInputDraft.length, liveOutputDraft.length) {
+        val total = messages.size +
+            (if (draft.isNotBlank()) 1 else 0) +
+            (if (liveInputDraft.isNotBlank()) 1 else 0) +
+            (if (liveOutputDraft.isNotBlank()) 1 else 0)
+        if (total > 0) {
+            listState.animateScrollToItem((total - 1).coerceAtLeast(0))
         }
     }
 
@@ -193,6 +202,15 @@ fun ChatScreen(
             }
         }
 
+        if (voiceState.liveModeActive) {
+            Text(
+                text = voiceState.statusBanner,
+                style = MaterialTheme.typography.labelMedium,
+                color = ZehnColors.Emerald,
+                modifier = Modifier.padding(vertical = 4.dp)
+            )
+        }
+
         Spacer(Modifier.height(6.dp))
 
         LazyColumn(
@@ -237,6 +255,28 @@ fun ChatScreen(
                         Text("Streaming...", style = MaterialTheme.typography.labelSmall, color = ZehnColors.Cyan)
                         Spacer(Modifier.height(4.dp))
                         Text(draft, style = MaterialTheme.typography.bodyLarge, color = ZehnColors.FrostWhite)
+                    }
+                }
+            }
+            if (liveInputDraft.isNotBlank()) {
+                item {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        ClayGlassCard(modifier = Modifier.fillMaxWidth(0.88f).testTag("live_input_transcript_card")) {
+                            Text("You (Live Voice)...", style = MaterialTheme.typography.labelSmall, color = ZehnColors.Cyan)
+                            Spacer(Modifier.height(4.dp))
+                            Text(liveInputDraft, style = MaterialTheme.typography.bodyLarge, color = ZehnColors.FrostWhite)
+                        }
+                    }
+                }
+            }
+            if (liveOutputDraft.isNotBlank()) {
+                item {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+                        ClayGlassCard(accentGlow = true, modifier = Modifier.fillMaxWidth(0.88f).testTag("live_output_transcript_card")) {
+                            Text("${voiceState.activeLiveModel.ifBlank { "Gemini Live" }} (Live Audio)...", style = MaterialTheme.typography.labelSmall, color = ZehnColors.Emerald)
+                            Spacer(Modifier.height(4.dp))
+                            Text(liveOutputDraft, style = MaterialTheme.typography.bodyLarge, color = ZehnColors.FrostWhite)
+                        }
                     }
                 }
             }
@@ -300,7 +340,9 @@ fun ChatScreen(
             IconButton(
                 onClick = {
                     if (input.isBlank() && attachedImage == null) {
-                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        if (voiceState.orbState != OrbState.IDLE) {
+                            vm.voiceCoordinator.bargeIn()
+                        } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                             vm.voiceCoordinator.startVoiceTurn()
                         } else {
                             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -315,9 +357,13 @@ fun ChatScreen(
                 modifier = Modifier.testTag("chat_send_button")
             ) {
                 Icon(
-                    imageVector = if (input.isBlank() && attachedImage == null) Icons.Filled.Mic else Icons.AutoMirrored.Filled.Send,
-                    contentDescription = "Send",
-                    tint = ZehnColors.Cyan
+                    imageVector = when {
+                        input.isNotBlank() || attachedImage != null -> Icons.AutoMirrored.Filled.Send
+                        voiceState.orbState != OrbState.IDLE -> Icons.Filled.Stop
+                        else -> Icons.Filled.Mic
+                    },
+                    contentDescription = if (input.isBlank() && attachedImage == null) "Voice" else "Send",
+                    tint = if (voiceState.orbState != OrbState.IDLE && input.isBlank() && attachedImage == null) ZehnColors.RoseStop else ZehnColors.Cyan
                 )
             }
         }

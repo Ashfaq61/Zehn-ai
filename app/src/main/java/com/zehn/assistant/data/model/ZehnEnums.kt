@@ -17,6 +17,7 @@ enum class AiProvider(
     OPENROUTER("OpenRouter", "https://openrouter.ai/api/v1/", true, true, true),
     TOGETHER("Together AI", "https://api.together.xyz/v1/", false, true, true),
     COHERE("Cohere", "https://api.cohere.com/v2/", false, true, true),
+    HUGGINGFACE("Hugging Face Inference", "https://router.huggingface.co/v1/", true, true, true),
     OLLAMA("Ollama Local Server", "http://127.0.0.1:11434/v1/", true, true, false),
     WEBHOOK("Webhook Backend", "http://127.0.0.1:8080/zehn", false, false, false),
     ON_DEVICE_LITERT("LiteRT-LM (On-Device)", "local://litert-lm", true, true, false)

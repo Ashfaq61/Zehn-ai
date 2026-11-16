@@ -9,8 +9,11 @@ import com.zehn.assistant.data.db.SkillDao
 import com.zehn.assistant.data.model.AiExecutionMode
 import com.zehn.assistant.data.model.AiProvider
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -38,12 +41,41 @@ class AiEngineRouter @Inject constructor(
     private val skillDao: SkillDao,
     private val actionLogDao: ActionLogDao
 ) {
+    private val lowRamMutex = Mutex()
+
+    val providerUsage: StateFlow<Map<AiProvider, ApiProviderUsage>> = cloudClient.providerUsage
+
+    suspend fun testProviderConnection(provider: AiProvider): ProviderConnectionTestResult =
+        cloudClient.testProviderConnection(provider)
+
+    fun isLowRamSingleRequestMode(): Boolean {
+        val ramMb = liteRtManager.state.value.totalRamMb
+        return ramMb in 1L until LOW_RAM_THRESHOLD_MB
+    }
+
     fun routeAndStream(
         history: List<LlmMessage>,
         userInput: String,
         projectId: Long? = null,
         imageUri: Uri? = null,
         tools: List<LlmToolDefinition> = emptyList()
+    ): Flow<RoutedStreamResult> = flow {
+        val lowRam = isLowRamSingleRequestMode()
+        if (lowRam) {
+            lowRamMutex.withLock {
+                executeRoutedStream(history, userInput, projectId, imageUri, tools).collect { emit(it) }
+            }
+        } else {
+            executeRoutedStream(history, userInput, projectId, imageUri, tools).collect { emit(it) }
+        }
+    }
+
+    private fun executeRoutedStream(
+        history: List<LlmMessage>,
+        userInput: String,
+        projectId: Long?,
+        imageUri: Uri?,
+        tools: List<LlmToolDefinition>
     ): Flow<RoutedStreamResult> = flow {
         val settings = prefs.settings.first()
         val citations = ragEngine.queryCitations(projectId, userInput)
@@ -106,10 +138,10 @@ class AiEngineRouter @Inject constructor(
             }
         }
 
-        // Cloud primary + fallback chain with malformed JSON/tool repair retry
         val providersToTry = buildList {
             add(settings.activeProvider)
             settings.fallbackChain.forEach { if (it != settings.activeProvider) add(it) }
+            if (AiProvider.HUGGINGFACE !in this) add(AiProvider.HUGGINGFACE)
         }
 
         var delivered = false
@@ -156,7 +188,6 @@ class AiEngineRouter @Inject constructor(
                                 )
                             )
                         } else {
-                            // Auto-retry once on malformed JSON tool parameters
                             actionLogDao.insert(
                                 ActionLogEntity("MODEL", "Malformed Tool JSON Repair", "Retrying ${ev.call.name} with schema repair prompt", "INFO")
                             )
@@ -211,6 +242,7 @@ class AiEngineRouter @Inject constructor(
 
         return buildString {
             appendLine(persona)
+            appendLine("Multilingual Policy: Understand and reply naturally in the user's language (English, Urdu script, Roman Urdu, or Hindi/Hinglish) matching their phrasing concisely.")
             appendLine("Device Local Time & Timezone: $localNow")
             if (memories.isNotEmpty()) {
                 appendLine("\nActive 4-Tier Memory:")
@@ -231,5 +263,9 @@ class AiEngineRouter @Inject constructor(
                 }
             }
         }
+    }
+
+    companion object {
+        const val LOW_RAM_THRESHOLD_MB = 4096L
     }
 }

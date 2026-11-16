@@ -9,6 +9,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -24,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
@@ -35,13 +37,16 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RocketLaunch
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -58,11 +63,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zehn.assistant.R
+import com.zehn.assistant.ai.ProviderCatalog
 import com.zehn.assistant.ui.ZehnViewModel
 import com.zehn.assistant.ui.components.ClayActionButton
 import com.zehn.assistant.ui.components.ClayGlassCard
@@ -89,6 +96,9 @@ fun HubScreen(onNavigate: (String) -> Unit) {
             HubDestinationItem("security", "Security", "Safety toggles & action logs", Icons.Filled.Security),
             HubDestinationItem("touch_guard", "Touch Guard", "Gaming guard, bubble & Samsung", Icons.Filled.TouchApp),
             HubDestinationItem("mission", "Mission Mode", "AgentLoop, Workflows & Flows", Icons.Filled.RocketLaunch),
+            HubDestinationItem("call_assistant", "Call Assistant", "VIP filter, auto-answer & VoIP", Icons.Filled.TouchApp),
+            HubDestinationItem("open_source_discovery", "OS Discovery", "Safe GitHub & Hugging Face inspect", Icons.Filled.Extension),
+            HubDestinationItem("diagnostics", "Diagnostics", "Truthful Active / Blocked audit", Icons.Filled.VerifiedUser),
             HubDestinationItem("permissions", "Permissions", "System & default assistant audit", Icons.Filled.VerifiedUser),
             HubDestinationItem("api_keys", "API Keys", "Keystore AES-GCM vault", Icons.Filled.Key),
             HubDestinationItem("conversations", "Conversations", "Search Room chat history", Icons.Filled.History),
@@ -206,8 +216,11 @@ fun PermissionsScreen(vm: ZehnViewModel) {
 fun SettingsScreen(vm: ZehnViewModel) {
     val context = LocalContext.current
     val settings by vm.settings.collectAsStateWithLifecycle()
+    val liveDiscovery by vm.liveModelsDiscovery.collectAsStateWithLifecycle()
+    val voiceState by vm.voiceUiState.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var autoReplyDraft by remember(settings.autoReplySmsText) { mutableStateOf(settings.autoReplySmsText) }
+    var customLiveModelDraft by remember(settings.geminiLiveCustomModel) { mutableStateOf(settings.geminiLiveCustomModel) }
 
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
@@ -236,9 +249,137 @@ fun SettingsScreen(vm: ZehnViewModel) {
         }
 
         item {
+            ClayGlassCard(accentGlow = true) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Gemini Live API (Native Audio)", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan)
+                        Text(
+                            "16kHz PCM mic -> 24kHz AudioTrack + tools; auto-fallback to STT/LLM/TTS",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ZehnColors.SlateMuted
+                        )
+                    }
+                    IconButton(
+                        onClick = { vm.refreshAvailableLiveModels() },
+                        modifier = Modifier.testTag("refresh_live_models_button")
+                    ) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh Live Models", tint = ZehnColors.Cyan)
+                    }
+                }
+
+                SettingToggle(
+                    title = "Enable Gemini Live Voice",
+                    subtitle = "Uses Gemini Live WebSocket first when online; falls back automatically if unavailable",
+                    checked = settings.geminiLiveVoiceEnabled
+                ) {
+                    vm.toggleGeminiLiveVoice(it)
+                }
+
+                Text(
+                    text = liveDiscovery.statusMessage,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (liveDiscovery.availableModels.isNotEmpty()) ZehnColors.Emerald else ZehnColors.Amber
+                )
+                if (voiceState.activeLiveModel.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "In Use: ${voiceState.activeLiveModel}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ZehnColors.Cyan
+                    )
+                }
+
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Primary: ${settings.geminiLiveModel} • Fallback: ${settings.geminiLiveFallbackModel}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ZehnColors.SlateMuted
+                )
+
+                if (liveDiscovery.availableModels.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Available Live Models (Select Primary)", style = MaterialTheme.typography.labelMedium, color = ZehnColors.Cyan)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        liveDiscovery.availableModels.forEach { m ->
+                            FilterChip(
+                                selected = settings.geminiLiveModel == m.id && settings.geminiLiveCustomModel.isBlank(),
+                                onClick = { vm.setGeminiLiveModel(m.id) },
+                                label = { Text(m.id) }
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+                    Text("Available Live Models (Select Fallback)", style = MaterialTheme.typography.labelMedium, color = ZehnColors.Cyan)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        liveDiscovery.availableModels.forEach { m ->
+                            FilterChip(
+                                selected = settings.geminiLiveFallbackModel == m.id,
+                                onClick = { vm.setGeminiLiveFallbackModel(m.id) },
+                                label = { Text(m.id) }
+                            )
+                        }
+                    }
+                } else {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "Configured fallback chain: ${ProviderCatalog.DEFAULT_GEMINI_LIVE_MODEL} -> ${ProviderCatalog.FALLBACK_GEMINI_LIVE_MODEL}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = ZehnColors.SlateMuted
+                    )
+                }
+
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = customLiveModelDraft,
+                    onValueChange = { customLiveModelDraft = it },
+                    label = { Text("Custom Live Model Name (optional)") },
+                    placeholder = { Text(ProviderCatalog.DEFAULT_GEMINI_LIVE_MODEL) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("custom_live_model_input")
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ClayActionButton(
+                        text = "Save Custom Model",
+                        modifier = Modifier.weight(1f).testTag("save_custom_live_model_button"),
+                        onClick = { vm.setGeminiLiveCustomModel(customLiveModelDraft) }
+                    )
+                    if (settings.geminiLiveCustomModel.isNotBlank()) {
+                        ClayActionButton(
+                            text = "Clear",
+                            isDanger = true,
+                            onClick = {
+                                customLiveModelDraft = ""
+                                vm.setGeminiLiveCustomModel("")
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
             ClayGlassCard {
                 SettingToggle("Haptic Feedback", "Tactile vibration on orb, buttons & switches", settings.hapticFeedbackEnabled) {
                     vm.toggleHaptics(it)
+                }
+                SettingToggle("Continuous Voice Conversation", "Auto-relisten after Zehn finishes speaking (Classic pipeline)", settings.continuousConversationEnabled) {
+                    vm.toggleContinuousConversation(it)
                 }
                 SettingToggle("Offline 'Hey Zehn' Wake Word", "Foreground microphone readiness notification", settings.wakeWordEnabled) {
                     vm.toggleWakeWord(it)

@@ -18,6 +18,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.provider.AlarmClock
 import android.provider.CalendarContract
+import android.provider.MediaStore
 import android.provider.Settings
 import android.telephony.SmsManager
 import android.view.KeyEvent
@@ -51,47 +52,51 @@ class PhoneControlExecutor @Inject constructor(
 ) {
     private var torchEnabled = false
 
-    private val knownAppPackages = mapOf(
-        "instagram" to "com.instagram.android",
-        "whatsapp" to "com.whatsapp",
-        "whatsapp business" to "com.whatsapp.w4b",
-        "spotify" to "com.spotify.music",
-        "youtube" to "com.google.android.youtube",
-        "facebook" to "com.facebook.katana",
-        "chrome" to "com.android.chrome",
-        "gmail" to "com.google.android.gm",
-        "settings" to "com.android.settings"
+    private val knownAppAliases: List<Pair<String, List<String>>> = listOf(
+        "whatsapp business" to listOf("com.whatsapp.w4b"),
+        "whatsapp" to listOf("com.whatsapp", "com.whatsapp.w4b"),
+        "facebook lite" to listOf("com.facebook.lite"),
+        "facebook" to listOf("com.facebook.katana", "com.facebook.lite"),
+        "tiktok" to listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill"),
+        "youtube" to listOf("com.google.android.youtube"),
+        "instagram" to listOf("com.instagram.android"),
+        "spotify" to listOf("com.spotify.music"),
+        "google maps" to listOf("com.google.android.apps.maps"),
+        "maps" to listOf("com.google.android.apps.maps"),
+        "google search" to listOf("com.google.android.googlequicksearchbox", "com.android.chrome"),
+        "google" to listOf("com.google.android.googlequicksearchbox", "com.android.chrome"),
+        "chrome" to listOf("com.android.chrome"),
+        "gmail" to listOf("com.google.android.gm"),
+        "gallery" to listOf("com.google.android.apps.photos", "com.sec.android.gallery3d", "com.miui.gallery"),
+        "photos" to listOf("com.google.android.apps.photos", "com.sec.android.gallery3d"),
+        "phone" to listOf("com.google.android.dialer", "com.samsung.android.dialer", "com.android.dialer"),
+        "dialer" to listOf("com.google.android.dialer", "com.samsung.android.dialer", "com.android.dialer"),
+        "messages" to listOf("com.google.android.apps.messaging", "com.samsung.android.messaging", "com.android.mms"),
+        "sms" to listOf("com.google.android.apps.messaging", "com.samsung.android.messaging", "com.android.mms"),
+        "settings" to listOf("com.android.settings")
     )
 
-    /**
-     * Fixes false "launcher disabled" errors on Android 11+ by querying launcher activities explicitly
-     * alongside PackageManager.getLaunchIntentForPackage, and reports honestly if app is not installed.
-     */
     suspend fun openApp(appNameOrPackage: String): String {
         val clean = appNameOrPackage.trim().lowercase()
-        val candidatePkg = knownAppPackages.entries.firstOrNull { clean.contains(it.key) }?.value ?: appNameOrPackage.trim()
+        if (clean == "camera") {
+            return openSystemCameraApp(frontCamera = false)
+        }
+        val candidates = knownAppAliases.firstOrNull { (alias, _) -> clean.contains(alias) }?.second
+            ?: listOf(appNameOrPackage.trim())
+
+        val candidatePkg = candidates.firstOrNull { isPackageInstalled(it) } ?: candidates.first()
 
         if (safetyPolicy.isAppBlocked(candidatePkg)) {
             actionLogDao.insert(ActionLogEntity("SAFETY", "App Launch Blocked", "$candidatePkg is on block-list", "BLOCKED"))
             return "Blocked: $appNameOrPackage is in your app block-list."
         }
 
-        val pm = context.packageManager
-        val isInstalled = runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                pm.getPackageInfo(candidatePkg, PackageManager.PackageInfoFlags.of(0))
-            } else {
-                @Suppress("DEPRECATION")
-                pm.getPackageInfo(candidatePkg, 0)
-            }
-            true
-        }.getOrDefault(false)
-
-        if (!isInstalled) {
+        if (!isPackageInstalled(candidatePkg)) {
             actionLogDao.insert(ActionLogEntity("AGENT_FAST", "Open App Failed", "$candidatePkg not installed", "FAILED"))
             return "$appNameOrPackage ($candidatePkg) is not installed on this device."
         }
 
+        val pm = context.packageManager
         val launchIntent = pm.getLaunchIntentForPackage(candidatePkg) ?: run {
             val mainIntent = Intent(Intent.ACTION_MAIN).apply {
                 addCategory(Intent.CATEGORY_LAUNCHER)
@@ -118,6 +123,76 @@ class PhoneControlExecutor @Inject constructor(
         }.getOrElse { err ->
             "Could not open $appNameOrPackage: ${err.message}"
         }
+    }
+
+    suspend fun openSystemCameraApp(frontCamera: Boolean = false): String {
+        val intent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (frontCamera) {
+                putExtra("android.intent.extras.CAMERA_FACING", 1)
+                putExtra("android.intent.extras.LENS_FACING_FRONT", 1)
+                putExtra("android.intent.extra.USE_FRONT_CAMERA", true)
+            }
+        }
+        return runCatching {
+            context.startActivity(intent)
+            actionLogDao.insert(
+                ActionLogEntity("AGENT_FAST", "Camera Launched", if (frontCamera) "Front" else "Back", "SUCCESS")
+            )
+            if (frontCamera) "Opened Camera app (requested front lens)." else "Opened Camera app."
+        }.getOrElse { "Unable to launch Camera app: ${it.message}" }
+    }
+
+    fun closeCurrentApp(): String {
+        val svc = ZehnAccessibilityService.instance.value
+        return if (svc != null && svc.performHome()) {
+            "Returned to Home screen. (Android security prohibits force-closing other apps cleanly without root.)"
+        } else {
+            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching {
+                context.startActivity(homeIntent)
+                "Minimized current app to Home screen. (Android does not permit non-root force-stop of other apps.)"
+            }.getOrElse {
+                "Enable Accessibility Service or grant permission to return Home."
+            }
+        }
+    }
+
+    fun searchGoogle(query: String): String {
+        val clean = query.trim().ifBlank { "latest news" }
+        val url = "https://www.google.com/search?q=${URLEncoder.encode(clean, "UTF-8")}"
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (isPackageInstalled("com.android.chrome")) {
+                setPackage("com.android.chrome")
+            }
+        }
+        return runCatching {
+            context.startActivity(intent)
+            "Opened Google Search for \"$clean\"."
+        }.getOrElse { "Could not open Google Search: ${it.message}" }
+    }
+
+    fun openMaps(destinationOrQuery: String): String {
+        val clean = destinationOrQuery.trim()
+        val uri = if (clean.isBlank()) {
+            Uri.parse("geo:0,0")
+        } else {
+            Uri.parse("geo:0,0?q=${URLEncoder.encode(clean, "UTF-8")}")
+        }
+        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (isPackageInstalled("com.google.android.apps.maps")) {
+                setPackage("com.google.android.apps.maps")
+            }
+        }
+        return runCatching {
+            context.startActivity(intent)
+            if (clean.isBlank()) "Opened Google Maps." else "Opened Google Maps for \"$clean\"."
+        }.getOrElse { "Could not open Maps: ${it.message}" }
     }
 
     suspend fun initiateCall(phoneNumber: String): String {
@@ -242,13 +317,11 @@ class PhoneControlExecutor @Inject constructor(
         }.getOrElse { "Could not open WhatsApp: ${it.message}" }
     }
 
-    /**
-     * Social Media Agent: Always warns that automated posting may violate platform Terms of Service.
-     */
     fun postToSocialMedia(platform: String, caption: String, imageUri: Uri? = null): String {
         val pkg = when (platform.lowercase()) {
             "instagram" -> "com.instagram.android"
             "facebook" -> "com.facebook.katana"
+            "tiktok" -> "com.zhiliaoapp.musically"
             "whatsapp", "whatsapp status" -> "com.whatsapp"
             else -> ""
         }
@@ -262,7 +335,7 @@ class PhoneControlExecutor @Inject constructor(
                 title = "Confirm $platform Post",
                 detail = "Prepare $platform share with caption: \"$caption\"",
                 targetPackage = pkg,
-                warningBanner = "Policy Warning: Automated posting or bot interaction on Instagram, Facebook, or WhatsApp may violate platform Terms of Service. Zehn will open the official share sheet for your manual review.",
+                warningBanner = "Policy Warning: Automated posting or bot interaction on Instagram, Facebook, TikTok, or WhatsApp may violate platform Terms of Service. Zehn will open the official share sheet for your manual review.",
                 onConfirm = {
                     val shareIntent = Intent(Intent.ACTION_SEND).apply {
                         type = if (imageUri != null) "image/*" else "text/plain"
@@ -482,7 +555,7 @@ class PhoneControlExecutor @Inject constructor(
         }.getOrElse { "Web search error: ${it.message}" }
     }
 
-    private fun isPackageInstalled(packageName: String): Boolean {
+    fun isPackageInstalled(packageName: String): Boolean {
         return runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 context.packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))

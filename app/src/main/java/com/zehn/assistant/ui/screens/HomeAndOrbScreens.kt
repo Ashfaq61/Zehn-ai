@@ -201,8 +201,9 @@ fun HomeScreen(
             }
         }
 
-        // Quick Automation Chips
+        // Quick Automation & Status Chips
         item {
+            val accConnected by vm.accessibilityConnected.collectAsStateWithLifecycle()
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -215,9 +216,11 @@ fun HomeScreen(
                 QuickCommandChip("Agent Mission", Icons.Filled.Bolt, onClick = onOpenMission)
                 QuickCommandChip("AI Models", Icons.Filled.Memory, onClick = onOpenModels)
                 QuickCommandChip("Safety & Logs", Icons.Filled.Shield, onClick = onOpenSecurity)
-                QuickCommandChip("WhatsApp / Call", Icons.Filled.PhoneInTalk) {
-                    vm.sendChatMessage("Read notifications")
-                }
+                QuickCommandChip(
+                    if (accConnected != null) "GUI: Active" else "GUI: Off",
+                    Icons.Filled.PhoneInTalk,
+                    onClick = onOpenMission
+                )
             }
         }
 
@@ -245,7 +248,7 @@ fun HomeScreen(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = when (step.status) {
                                     "DONE" -> ZehnColors.Emerald
-                                    "BLOCKED" -> ZehnColors.RoseStop
+                                    "BLOCKED", "FAILED" -> ZehnColors.RoseStop
                                     else -> ZehnColors.Cyan
                                 }
                             )
@@ -286,7 +289,7 @@ fun HomeScreen(
                     Column {
                         Text("Automations & Voice", style = MaterialTheme.typography.titleMedium, color = ZehnColors.FrostWhite)
                         Text(
-                            "$activeCount active triggers • Wake word: ${if (settings.wakeWordEnabled) "ON" else "OFF"} • Voice: ${settings.activeVoice.displayName}",
+                            "$activeCount active triggers • Wake word: ${if (settings.wakeWordEnabled) "ON" else "OFF"} • Continuous: ${if (settings.continuousConversationEnabled) "ON" else "OFF"} • Voice: ${settings.activeVoice.displayName}",
                             style = MaterialTheme.typography.bodyMedium,
                             color = ZehnColors.SlateMuted
                         )
@@ -358,7 +361,11 @@ fun OrbScreen(
             Column {
                 Text("Zehn Voice Orb", style = MaterialTheme.typography.titleLarge, color = ZehnColors.FrostWhite)
                 Text(
-                    "VAD: ${settings.vadEngine.label} • Lang: ${voiceState.detectedLanguage.label}",
+                    text = if (voiceState.activeLiveModel.isNotBlank()) {
+                        "Live: ${voiceState.activeLiveModel}"
+                    } else {
+                        "VAD: ${settings.vadEngine.label} • Lang: ${voiceState.detectedLanguage.label}"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = ZehnColors.Cyan
                 )
@@ -398,6 +405,17 @@ fun OrbScreen(
             )
             Spacer(Modifier.height(8.dp))
             Text(voiceState.statusBanner, style = MaterialTheme.typography.bodyMedium, color = ZehnColors.SlateMuted)
+            Spacer(Modifier.height(6.dp))
+            AssistChip(
+                onClick = { vm.toggleContinuousConversation(!settings.continuousConversationEnabled) },
+                label = {
+                    Text(
+                        if (settings.continuousConversationEnabled) "Continuous Mode: ON" else "Continuous Mode: OFF",
+                        color = if (settings.continuousConversationEnabled) ZehnColors.Emerald else ZehnColors.SlateMuted
+                    )
+                },
+                colors = AssistChipDefaults.assistChipColors(containerColor = ZehnColors.SurfaceElevated)
+            )
         }
 
         ClayGlassCard(modifier = Modifier.fillMaxWidth()) {
@@ -408,7 +426,7 @@ fun OrbScreen(
             Text(
                 text = voiceState.lastReply.ifBlank {
                     if (planState.goal.isNotBlank()) "Plan: ${planState.goal}\n${planState.summary}"
-                    else "Say \"Hey Zehn\", \"Open Spotify\", \"Battery status\", or speak Urdu / Hindi / Hinglish."
+                    else "Say \"Hey Zehn\", \"Open WhatsApp\", \"YouTube par search karo\", or \"Front camera open karo\"."
                 },
                 style = MaterialTheme.typography.bodyLarge,
                 color = ZehnColors.FrostWhite,
@@ -417,13 +435,20 @@ fun OrbScreen(
             Spacer(Modifier.height(12.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 ClayActionButton(
-                    text = if (voiceState.orbState == OrbState.IDLE) "Listen" else "Barge-In / Stop",
+                    text = when {
+                        voiceState.orbState == OrbState.IDLE -> "Listen"
+                        voiceState.orbState == OrbState.SPEAKING -> "Barge-In"
+                        else -> "Stop Voice"
+                    },
                     icon = if (voiceState.orbState == OrbState.IDLE) Icons.Filled.Mic else Icons.Filled.Stop,
                     isDanger = voiceState.orbState != OrbState.IDLE,
                     modifier = Modifier.weight(1f),
                     onClick = {
-                        if (voiceState.orbState == OrbState.IDLE) startMicWithPermission()
-                        else vm.voiceCoordinator.bargeIn()
+                        when (voiceState.orbState) {
+                            OrbState.IDLE -> startMicWithPermission()
+                            OrbState.SPEAKING -> vm.voiceCoordinator.bargeIn()
+                            else -> vm.voiceCoordinator.stopAll()
+                        }
                     }
                 )
                 ClayActionButton(

@@ -24,6 +24,14 @@ data class LiteRtModelSpec(
 }
 
 object ProviderCatalog {
+    const val DEFAULT_GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview"
+    const val FALLBACK_GEMINI_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+
+    val defaultGeminiLiveModels: List<ModelOption> = listOf(
+        ModelOption(DEFAULT_GEMINI_LIVE_MODEL, "Gemini 3.1 Flash Live", "Live Audio", true),
+        ModelOption(FALLBACK_GEMINI_LIVE_MODEL, "Gemini 2.5 Flash Native Audio", "Live Audio", true)
+    )
+
     val modelsByProvider: Map<AiProvider, List<ModelOption>> = mapOf(
         AiProvider.GEMINI to listOf(
             ModelOption("gemini-2.5-flash", "Gemini 2.5 Flash", "1M", true),
@@ -56,6 +64,11 @@ object ProviderCatalog {
         AiProvider.COHERE to listOf(
             ModelOption("command-a-03-2025", "Command A", "256K", false),
             ModelOption("command-r-plus-08-2024", "Command R+", "128K", false)
+        ),
+        AiProvider.HUGGINGFACE to listOf(
+            ModelOption("Qwen/Qwen2.5-72B-Instruct", "Qwen 2.5 72B Instruct (HF)", "128K", false),
+            ModelOption("meta-llama/Llama-3.3-70B-Instruct", "Llama 3.3 70B Instruct (HF)", "128K", false),
+            ModelOption("google/gemma-3-27b-it", "Gemma 3 27B IT (HF)", "128K", true)
         ),
         AiProvider.OLLAMA to listOf(
             ModelOption("gemma3:4b", "Gemma 3 4B (Local)", "128K", true),

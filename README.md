@@ -1,102 +1,60 @@
-# Zehn AI (`com.zehn.assistant`)
+# MAHI / Zehn AI V3.3 (`com.zehn.assistant`)
 
-**Zehn AI** is a privacy-first Android voice assistant and autonomous phone-automation agent built with Kotlin, Jetpack Compose (Material 3), MVVM, Hilt, Room, Coroutines/Flow, OkHttp/Retrofit, CameraX + ML Kit, and Google LiteRT-LM (`minSdk 24`, `targetSdk 35`, 32-bit & 64-bit).
+**Mahi / Zehn AI V3.3** is a privacy-first, bilingual Android voice assistant and phone-automation agent built with **Kotlin**, **Jetpack Compose (Material 3)**, **MVVM + Hilt**, **Room**, **Coroutines/Flow**, **OkHttp/Retrofit**, **CameraX + ML Kit**, and **Google LiteRT-LM** (`minSdk 24`, `targetSdk 35`).
 
----
-
-## Key Capabilities
-
-- **Modular Voice Pipeline**: Silero-style acoustic VAD -> Swappable STT (`SpeechRecognizer`, Whisper-compatible, offline fallback) -> Streaming LLM (sentence-chunked) -> TTS with **8 voices** (4 female, 4 male), barge-in interruption, offline `"Hey Zehn"` wake-word foreground service, `VoiceInteractionService` (default system assistant), Realtime WebSocket mode, and Webhook mode.
-- **Multilingual Auto-Detection**: English (`en`), Urdu (`ur`), Hindi (`hi`), and Hinglish / Roman Urdu.
-- **Multi-Provider AI Engine & On-Device Gemma 4**:
-  - Cloud & local providers: Gemini (multi-key auto-rotation on quota errors), OpenAI-compatible, Anthropic/Claude, Groq, OpenRouter, Together, Cohere, and Ollama.
-  - On-device **LiteRT-LM** (`Gemma 4 E2B Q4`, `Gemma 4 E4B`, `Qwen3 0.6B`) with Hugging Face resumable downloads, RAM & storage checks, GPU/CPU Auto-Tuner, and Cloud / Hybrid / Offline routing.
-  - On-device **RAG Projects** (PDF/TXT/Image OCR chunking + 64-dim embeddings in Room/SQLite with citations), live CameraX + ML Kit OCR/QR scanning, photo vision analysis, and toggle-gated image generation.
-- **Phone Automation Agent**:
-  - `AgentLoop`, `PlanManager`, `IntentClassifier`, `VisionEngine` with Fast Path (Direct Intent/DeepLink) & Standard Path (`AccessibilityService` GUI observe-act-reflect loop).
-  - User-editable `SKILL.md` skills, JSON Workflows, fixed YAML Flows with task recording & zero-LLM replay, Triggers, Call Assistant, Notification Listener, Floating Bubble, Quick Settings Tile, and Home Widget.
-- **4-Tier Memory, Encrypted Vault & Crash Recovery**:
-  - Working, Session, Long-Term, and Notification Intelligence tiers with "Forget" controls and JSON backup export/import.
-  - Hardware-backed **Android Keystore AES-256-GCM** encrypted secret vault (zero hardcoded keys, zero analytics).
-  - Default-OFF **Automated Payment Confirmation**, **Gaming Assistant Screen Check**, **Image Generation** toggle, app block-list, step limit, Emergency STOP, Action Log, Samsung OneUI guidance, and sanitized **Crash Recovery** on restart.
+> All existing `com.zehn.assistant` identifiers, Room database schemas, encrypted Keystore preferences, and Clay/Glass Material 3 UI are preserved and upgraded for V3.3.
 
 ---
 
-## 1. Google AI Studio -> GitHub Export & Push Workflow
+## Core V3.3 Capabilities
 
-1. **Export / Push from Google AI Studio**:
-   - Use the **Export / Push to GitHub** option in Google AI Studio settings, **or** export the workspace ZIP, extract it locally, and push cleanly via Git:
-     ```bash
-     git init
-     git branch -M main
-     git add .
-     git commit -m "Initial Zehn AI v1.0.0"
-     git remote add origin https://github.com/<YOUR_USERNAME>/<YOUR_REPO>.git
-     git push -u origin main
-     ```
-2. **Security Rules**:
-   - **Never** commit GitHub Personal Access Tokens (PATs), `.env` files, or `.jks`/`.keystore` files into the repository (already excluded in `.gitignore`).
-   - Use GitHub's secure OAuth/SSH authentication or GitHub Actions Secrets.
+- **Advanced Multi-Provider AI Brain & Encrypted Vault**:
+  - Supports **Gemini** (header-based `x-goog-api-key` auth + multi-key quota rotation), **OpenAI-compatible**, **Anthropic**, **Groq**, **OpenRouter**, **Hugging Face Inference Router**, **Together**, **Cohere**, **Ollama**, and on-device **LiteRT-LM** (`Gemma 4 E2B / E4B`, `Qwen3 0.6B`) with `< 4096 MB` low-RAM OOM protection.
+  - Real per-provider connection test probes (`latency` + HTTP diagnostics), live API usage counters, Add/Edit/Delete key slots, and hardware-backed **Android Keystore AES-256-GCM** storage (zero hardcoded keys, token redaction in error logs & crash reports).
+  - **Open-Source Discovery**: Read-only search across GitHub Search API and Hugging Face Models API with SPDX license checks and device RAM compatibility hints.
+- **Bilingual Voice Control & Gemini Live Audio**:
+  - Understands **English**, **Urdu (`ur`)**, **Hindi (`hi`)**, and **Roman Urdu / Hinglish** (`"WhatsApp kholo"`, `"YouTube par lofi search karo"`, `"Google par weather search karo"`, `"Front camera open karo"`, `"band karo"`).
+  - Supports **Gemini Live WebSocket native audio** (16 kHz mic PCM + 24 kHz `AudioTrack` playback, barge-in, tool calling, live `/models` `bidiGenerateContent` filtering) with automatic **STT -> Streaming LLM -> 8-Voice TTS** fallback and opt-in **Continuous Voice Conversation** mode.
+- **6-Stage Accessibility Agent & App Launchers**:
+  - Fast-path intents + `<queries>` visibility for 11+ apps (WhatsApp, Facebook/Lite, TikTok, YouTube, Instagram, Spotify, Maps, Google Search, Chrome, Gmail, Gallery/Photos, Dialer, Messages, Settings, Camera).
+  - Accessibility Service (`Observe -> Understand -> Plan -> Execute -> Verify -> Recover`) with tap, swipe/scroll, Back, Home/minimize, Recents, MediaStore screenshots, **password/PIN/OTP masking**, and default-OFF **Payment Confirmation** & **Gaming Screen** safety guards.
+- **CameraX Vision, Call Assistant & Diagnostics**:
+  - Live `CameraVisionDialog` with Front/Back lens toggle, Torch toggle, MediaStore Photo + Video recording (`RECORD_AUDIO` gated), and ML Kit OCR/QR scan.
+  - `ZehnCallScreeningService` (API 29+) + `CallAssistantManager` with `ContactsContract` lookup, VIP bypass list, configurable countdown auto-answer, SMS reject reply, and transparent `CallCapabilityReport`.
+  - Global uncaught crash logger (`filesDir/crash.txt`) with sanitized Copy/Dismiss recovery screen and **GitHub Auto-Dev** WorkManager agent.
 
----
-
-## 2. GitHub Actions APK Build & Signed Release Setup
-
-Workflow file: `.github/workflows/android-build.yml`
-
-- **Automatic Builds**: Triggers on every push to `main`, pull requests to `main`, `v*` release tags, and manual `workflow_dispatch`.
-- **Pipeline Steps**:
-  1. Sets up JDK 17, Android SDK, and Gradle `9.3.1` (bootstraps `./gradlew` if absent).
-  2. Runs `./gradlew :app:dependencies` and `./gradlew clean test assembleDebug`.
-  3. Validates `app/build/outputs/apk/debug/app-debug.apk` (`aapt2 dump badging` confirms package `com.zehn.assistant`, `minSdk 24`, `targetSdk 35`, non-zero size, and SHA-256).
-  4. Builds a **Signed Release APK** (`./gradlew assembleRelease`) whenever signing secrets are set.
-  5. Uploads **Debug APK**, **Unit & Robolectric Test Reports**, and **Signed Release APK** as GitHub Actions Artifacts (`if-no-files-found: error`).
-  6. Creates a **GitHub Release** with auto-generated changelog (`overwrite_files: false` to preserve prior stable releases) when a tag like `v1.0.0` is pushed.
-
-### Optional Release Signing Secrets (`Settings -> Secrets and variables -> Actions`)
-
-Create an upload keystore locally (`keytool -genkeypair -v -keystore my-upload-key.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000`) and add these repository secrets:
-
-| Secret Name | Value |
-|---|---|
-| `RELEASE_KEYSTORE_BASE64` | Base64 output of `base64 -w0 my-upload-key.jks` |
-| `STORE_PASSWORD` | Keystore password |
-| `KEY_PASSWORD` | Key password (for alias `upload`) |
-
-> Keep the same keystore for all future updates so Android allows in-place upgrades over `com.zehn.assistant`.
+See [`FEATURE_STATUS.md`](./FEATURE_STATUS.md) for the honest 6-tier verification matrix and [`CHANGELOG.md`](./CHANGELOG.md) for full V3.3 notes.
 
 ---
 
-## 3. Versioning, Safe Updates & Rollback
+## Verified Local Build & Test Commands
 
-- Initial release starts at `versionName = "1.0.0"`, `versionCode = 1` in `app/build.gradle.kts`.
-- For every new release, increment `versionCode` by `+1`, bump `versionName` (e.g., `1.0.1`), commit to `main`, and push a matching tag:
+- **AI Studio / system Gradle container**:
   ```bash
-  git tag v1.0.0
-  git push origin v1.0.0
+  gradle :app:testDebugUnitTest --stacktrace
+  gradle assembleDebug
   ```
-- Previous GitHub Releases and their attached APKs remain untouched (`overwrite_files: false`) for instant rollback.
+- **Local Android Studio / Git checkout (with Gradle wrapper)**:
+  ```bash
+  ./gradlew clean testDebugUnitTest assembleDebug --stacktrace
+  ```
 
 ---
 
-## 4. Local Build & Test Commands
+## GitHub Actions CI/CD (`.github/workflows/android-build.yml`)
 
-- In **Android Studio / local machine**:
-  ```bash
-  ./gradlew clean test assembleDebug
-  ```
-- In **AI Studio / system-Gradle container**:
-  ```bash
-  gradle clean test assembleDebug
-  ```
-- Output APK location:
-  - Debug: `app/build/outputs/apk/debug/app-debug.apk`
-  - Signed Release: `app/build/outputs/apk/release/app-release.apk`
+- **Triggers**: Pushes & PRs to `main`, `v*` release tags, and manual `workflow_dispatch`.
+- **Pipeline**:
+  1. Sets up JDK 17, Android SDK licenses, and Gradle `9.3.1` (wrapper-independent with `./gradlew` fallback).
+  2. Executes `testDebugUnitTest` + `assembleDebug` and validates non-empty APK output + SHA-256.
+  3. Uploads test reports (`mahi-zehn-test-reports`) and Debug APK (`mahi-zehn-debug-apk`).
+  4. When release signing secrets (`RELEASE_KEYSTORE_BASE64` or `KEYSTORE_BASE64`, `STORE_PASSWORD`, `KEY_PASSWORD`) are configured, builds & uploads the signed Release APK (`mahi-zehn-release-apk`).
+  5. Publishes a GitHub Release with attached APKs only when triggered by a `v*` tag on a green build (`overwrite_files: false`).
 
-## 5. Installing on Android
+---
 
-1. Download `app-debug.apk` (or `app-release.apk`) from **GitHub Actions -> Workflow Run -> Artifacts** or **GitHub Releases**.
-2. Transfer to your Android 7.0+ (API 24+) phone and tap to install (enable **Install unknown apps** when prompted).
-3. Inside Zehn AI:
-   - Open **API Keys** to add encrypted provider keys (or download Gemma 4 in **Voice & AI Models** for offline inference).
-   - Open **Permissions** & **Touch Guard** to enable Microphone, Camera, Accessibility Service, Notification Access, Floating Overlay, and Default System Assistant.
+## Important Android Platform Boundaries
+
+- **Cellular Call Uplink Audio**: Standard non-root Android apps cannot inject synthetic audio directly into the cellular call uplink microphone; Zehn honestly reports this in **Call Assistant** and focuses on local announcement, auto-answer/reject, SMS replies, and VoIP/SIP URI settings.
+- **Force-Closing Apps**: Non-root Android apps cannot force-stop other foreground apps; close commands cleanly minimize to the Home screen.
+- **Sensitive Accessibility Data**: Password, PIN, and OTP view contents are automatically masked (`[PROTECTED_PASSWORD]`).

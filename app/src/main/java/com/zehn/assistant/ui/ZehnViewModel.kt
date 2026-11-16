@@ -9,18 +9,25 @@ import com.zehn.assistant.ZehnApplication
 import com.zehn.assistant.agent.AgentLoop
 import com.zehn.assistant.agent.AgentPlanState
 import com.zehn.assistant.agent.CallAssistantManager
+import com.zehn.assistant.agent.CallCapabilityReport
+import com.zehn.assistant.agent.CallInteractionRecord
+import com.zehn.assistant.agent.CameraLaunchRequest
 import com.zehn.assistant.agent.FloatingBubbleService
 import com.zehn.assistant.agent.PhoneControlExecutor
 import com.zehn.assistant.agent.PlanManager
 import com.zehn.assistant.agent.ZehnAccessibilityService
 import com.zehn.assistant.agent.ZehnNotificationListenerService
 import com.zehn.assistant.ai.AiEngineRouter
+import com.zehn.assistant.ai.ApiProviderUsage
 import com.zehn.assistant.ai.CloudLlmClient
+import com.zehn.assistant.ai.GitHubRepoSuggestion
+import com.zehn.assistant.ai.HuggingFaceModelSuggestion
 import com.zehn.assistant.ai.LiteRtModelSpec
 import com.zehn.assistant.ai.LlmMessage
 import com.zehn.assistant.ai.OnDeviceLiteRtManager
 import com.zehn.assistant.ai.OnDeviceModelState
-import com.zehn.assistant.ai.ProviderCatalog
+import com.zehn.assistant.ai.OpenSourceDiscoveryClient
+import com.zehn.assistant.ai.ProviderConnectionTestResult
 import com.zehn.assistant.ai.RagEngine
 import com.zehn.assistant.data.BackupManager
 import com.zehn.assistant.data.PreferencesRepository
@@ -57,6 +64,8 @@ import com.zehn.assistant.security.PendingConfirmationRequest
 import com.zehn.assistant.security.SafetyPolicyManager
 import com.zehn.assistant.security.SafetyPolicyState
 import com.zehn.assistant.voice.LanguageDetector
+import com.zehn.assistant.voice.LiveChatTranscriptEvent
+import com.zehn.assistant.voice.LiveModelsDiscoveryState
 import com.zehn.assistant.voice.VoicePipelineCoordinator
 import com.zehn.assistant.voice.VoicePipelineUiState
 import com.zehn.assistant.voice.WakeWordService
@@ -64,6 +73,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -89,6 +99,7 @@ class ZehnViewModel @Inject constructor(
     private val actionLogDao: ActionLogDao,
     private val aiRouter: AiEngineRouter,
     private val cloudLlmClient: CloudLlmClient,
+    private val discoveryClient: OpenSourceDiscoveryClient,
     val liteRtManager: OnDeviceLiteRtManager,
     private val ragEngine: RagEngine,
     val voiceCoordinator: VoicePipelineCoordinator,
@@ -111,6 +122,9 @@ class ZehnViewModel @Inject constructor(
     val agentPlanState: StateFlow<AgentPlanState> = planManager.planState
     val recordingActive: StateFlow<Boolean> = agentLoop.recordingActive
     val keysVersion: StateFlow<Int> = crypto.keysUpdatedVersion
+    val providerUsage: StateFlow<Map<AiProvider, ApiProviderUsage>> = aiRouter.providerUsage
+    val recentCallRecords: StateFlow<List<CallInteractionRecord>> = callAssistant.recentCalls
+    val cameraLaunchRequests: SharedFlow<CameraLaunchRequest> = voiceCoordinator.cameraLaunchRequests
 
     val accessibilityConnected = ZehnAccessibilityService.instance
     val notificationListenerConnected = ZehnNotificationListenerService.connected
@@ -171,6 +185,29 @@ class ZehnViewModel @Inject constructor(
     private val _crashFileText = MutableStateFlow<String?>(readCrashLogFile())
     val crashFileText: StateFlow<String?> = _crashFileText.asStateFlow()
 
+    val liveModelsDiscovery: StateFlow<LiveModelsDiscoveryState> = voiceCoordinator.liveModelsDiscovery
+
+    private val _liveInputDraft = MutableStateFlow("")
+    val liveInputDraft: StateFlow<String> = _liveInputDraft.asStateFlow()
+
+    private val _liveOutputDraft = MutableStateFlow("")
+    val liveOutputDraft: StateFlow<String> = _liveOutputDraft.asStateFlow()
+
+    private val _providerTestResults = MutableStateFlow<Map<AiProvider, ProviderConnectionTestResult>>(emptyMap())
+    val providerTestResults: StateFlow<Map<AiProvider, ProviderConnectionTestResult>> = _providerTestResults.asStateFlow()
+
+    private val _testingProvider = MutableStateFlow<AiProvider?>(null)
+    val testingProvider: StateFlow<AiProvider?> = _testingProvider.asStateFlow()
+
+    private val _githubResults = MutableStateFlow<List<GitHubRepoSuggestion>>(emptyList())
+    val githubResults: StateFlow<List<GitHubRepoSuggestion>> = _githubResults.asStateFlow()
+
+    private val _hfResults = MutableStateFlow<List<HuggingFaceModelSuggestion>>(emptyList())
+    val hfResults: StateFlow<List<HuggingFaceModelSuggestion>> = _hfResults.asStateFlow()
+
+    private val _discoveryLoading = MutableStateFlow(false)
+    val discoveryLoading: StateFlow<Boolean> = _discoveryLoading.asStateFlow()
+
     init {
         viewModelScope.launch {
             val allConvs = conversationDao.getAllOnce()
@@ -184,6 +221,105 @@ class ZehnViewModel @Inject constructor(
                     _toastBanner.value = err
                 }
             }
+        }
+        viewModelScope.launch {
+            crypto.keysUpdatedVersion.collect {
+                runCatching { voiceCoordinator.refreshAvailableLiveModels() }
+            }
+        }
+        viewModelScope.launch {
+            voiceCoordinator.liveChatEvents.collect { ev ->
+                when (ev) {
+                    is LiveChatTranscriptEvent.InputDraft -> _liveInputDraft.value = ev.text
+                    is LiveChatTranscriptEvent.OutputDraft -> _liveOutputDraft.value = ev.text
+                    is LiveChatTranscriptEvent.ClearDrafts -> {
+                        _liveInputDraft.value = ""
+                        _liveOutputDraft.value = ""
+                    }
+                    is LiveChatTranscriptEvent.CommittedTurn -> {
+                        persistVoiceTranscriptToChat(ev.role, ev.content, ev.modelUsed)
+                    }
+                }
+            }
+        }
+    }
+
+    fun isLowRamSingleRequestMode(): Boolean = aiRouter.isLowRamSingleRequestMode()
+    fun callCapabilityReport(): CallCapabilityReport = callAssistant.capabilityReport()
+
+    fun testProviderConnection(provider: AiProvider) = viewModelScope.launch {
+        _testingProvider.value = provider
+        val res = aiRouter.testProviderConnection(provider)
+        _providerTestResults.value = _providerTestResults.value + (provider to res)
+        _testingProvider.value = null
+        _toastBanner.value = "${provider.displayName}: ${res.message}"
+    }
+
+    fun addGeminiKeySlot(key: String) {
+        if (key.isBlank()) return
+        crypto.addGeminiKey(key)
+        _toastBanner.value = "Added Gemini API key slot"
+    }
+
+    fun removeGeminiKeySlot(index: Int) {
+        crypto.removeGeminiKeyAt(index)
+        _toastBanner.value = "Removed Gemini API key slot #${index + 1}"
+    }
+
+    fun deleteProviderSecret(keyName: String, label: String) {
+        crypto.deleteSecret(keyName)
+        _toastBanner.value = "Deleted $label from encrypted vault"
+    }
+
+    fun searchOpenSourceTools(query: String) = viewModelScope.launch {
+        _discoveryLoading.value = true
+        discoveryClient.searchGitHubTools(query).onSuccess { items ->
+            _githubResults.value = items
+            if (items.isEmpty()) _toastBanner.value = "No GitHub repositories matched '$query'"
+        }.onFailure { err ->
+            _toastBanner.value = err.message ?: "GitHub search failed"
+        }
+        _discoveryLoading.value = false
+    }
+
+    fun searchHuggingFaceModels(query: String) = viewModelScope.launch {
+        _discoveryLoading.value = true
+        discoveryClient.searchHuggingFaceModels(query).onSuccess { items ->
+            _hfResults.value = items
+            if (items.isEmpty()) _toastBanner.value = "No Hugging Face models matched '$query'"
+        }.onFailure { err ->
+            _toastBanner.value = err.message ?: "Hugging Face search failed"
+        }
+        _discoveryLoading.value = false
+    }
+
+    private suspend fun persistVoiceTranscriptToChat(role: String, content: String, modelUsed: String) {
+        val clean = content.trim()
+        if (clean.isEmpty()) return
+        runCatching {
+            var convId = _activeConversationId.value
+            val existing = conversationDao.getAllOnce().firstOrNull { it.id == convId }
+            if (existing == null) {
+                convId = conversationDao.insert(
+                    ConversationEntity(
+                        title = clean.take(36),
+                        providerName = AiProvider.GEMINI.name,
+                        modelName = modelUsed
+                    )
+                )
+                _activeConversationId.value = convId
+            } else if (role == "user" && existing.title == "New Chat") {
+                conversationDao.update(existing.copy(title = clean.take(36), updatedAt = System.currentTimeMillis()))
+            }
+            messageDao.insert(
+                MessageEntity(
+                    conversationId = convId,
+                    role = role,
+                    content = clean,
+                    modelUsed = if (role == "assistant") modelUsed else "",
+                    detectedLanguage = LanguageDetector.detect(clean, settings.value.voiceLanguage).code
+                )
+            )
         }
     }
 
@@ -302,7 +438,6 @@ class ZehnViewModel @Inject constructor(
                     )
                 )
 
-                // Record working memory scratchpad
                 memoryDao.insert(
                     MemoryEntity(
                         tier = MemoryTier.WORKING.name,
@@ -312,7 +447,6 @@ class ZehnViewModel @Inject constructor(
                     )
                 )
 
-                // Try fast-path / agent command if no image attached
                 if (attachedImageUri == null) {
                     val agentReply = agentLoop.tryExecuteCommand(clean)
                     if (agentReply != null) {
@@ -430,7 +564,6 @@ class ZehnViewModel @Inject constructor(
         }
     }
 
-    // Settings mutations
     fun setExecutionMode(mode: AiExecutionMode) = viewModelScope.launch {
         prefs.updateSettings { it.copy(executionMode = mode) }
     }
@@ -499,6 +632,10 @@ class ZehnViewModel @Inject constructor(
         }
     }
 
+    fun toggleContinuousConversation(enabled: Boolean) = viewModelScope.launch {
+        prefs.updateSettings { it.copy(continuousConversationEnabled = enabled) }
+    }
+
     fun toggleFloatingBubble(enabled: Boolean) = viewModelScope.launch {
         if (enabled && !Settings.canDrawOverlays(app)) {
             prefs.updateSettings { it.copy(floatingBubbleEnabled = false) }
@@ -517,6 +654,34 @@ class ZehnViewModel @Inject constructor(
         prefs.updateSettings { it.copy(realtimeWebSocketEnabled = enabled) }
     }
 
+    fun toggleGeminiLiveVoice(enabled: Boolean) = viewModelScope.launch {
+        prefs.updateSettings { it.copy(geminiLiveVoiceEnabled = enabled) }
+    }
+
+    fun setGeminiLiveModel(modelId: String) = viewModelScope.launch {
+        val clean = modelId.trim().removePrefix("models/")
+        if (clean.isNotEmpty()) {
+            prefs.updateSettings { it.copy(geminiLiveModel = clean) }
+        }
+    }
+
+    fun setGeminiLiveFallbackModel(modelId: String) = viewModelScope.launch {
+        val clean = modelId.trim().removePrefix("models/")
+        if (clean.isNotEmpty()) {
+            prefs.updateSettings { it.copy(geminiLiveFallbackModel = clean) }
+        }
+    }
+
+    fun setGeminiLiveCustomModel(modelId: String) = viewModelScope.launch {
+        val clean = modelId.trim().removePrefix("models/")
+        prefs.updateSettings { it.copy(geminiLiveCustomModel = clean) }
+        _toastBanner.value = if (clean.isEmpty()) "Custom Live model cleared" else "Custom Live model saved: $clean"
+    }
+
+    fun refreshAvailableLiveModels() = viewModelScope.launch {
+        voiceCoordinator.refreshAvailableLiveModels()
+    }
+
     fun toggleWebhookMode(enabled: Boolean) = viewModelScope.launch {
         prefs.updateSettings { it.copy(webhookModeEnabled = enabled) }
     }
@@ -524,6 +689,32 @@ class ZehnViewModel @Inject constructor(
     fun toggleCallAssistant(enabled: Boolean) = viewModelScope.launch {
         prefs.updateSettings { it.copy(callAssistantEnabled = enabled) }
         if (enabled) callAssistant.startMonitoringIfPermitted()
+    }
+
+    fun updateCallAssistantConfig(
+        enabled: Boolean,
+        autoAnswer: Boolean,
+        delaySec: Int,
+        vipCsv: String,
+        callLanguage: VoiceLanguage,
+        receptionistPrompt: String,
+        voipEnabled: Boolean,
+        voipUri: String
+    ) = viewModelScope.launch {
+        prefs.updateSettings {
+            it.copy(
+                callAssistantEnabled = enabled,
+                callAutoAnswerEnabled = autoAnswer,
+                callAutoAnswerDelaySec = delaySec.coerceIn(2, 15),
+                vipContactsCsv = vipCsv,
+                callLanguage = callLanguage,
+                callReceptionistPrompt = receptionistPrompt,
+                voipSipModeEnabled = voipEnabled,
+                voipSipServerUri = voipUri.trim()
+            )
+        }
+        if (enabled) callAssistant.startMonitoringIfPermitted()
+        _toastBanner.value = "Call Assistant configuration saved"
     }
 
     fun toggleAutoReplySms(enabled: Boolean, text: String) = viewModelScope.launch {
@@ -539,7 +730,6 @@ class ZehnViewModel @Inject constructor(
         prefs.updateSettings { it.copy(userDisplayName = name) }
     }
 
-    // Memory & RAG
     fun addMemory(tier: MemoryTier, title: String, content: String, priority: Int = 6) = viewModelScope.launch {
         memoryDao.insert(MemoryEntity(tier = tier.name, title = title, content = content, priority = priority))
     }
@@ -560,7 +750,6 @@ class ZehnViewModel @Inject constructor(
         )
     }
 
-    // Skills, Workflows, Triggers
     fun saveSkill(skill: SkillEntity) = viewModelScope.launch { skillDao.insert(skill) }
     fun toggleSkill(skill: SkillEntity, enabled: Boolean) = viewModelScope.launch {
         skillDao.update(skill.copy(enabled = enabled, updatedAt = System.currentTimeMillis()))

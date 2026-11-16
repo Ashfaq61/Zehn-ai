@@ -112,6 +112,11 @@ class KeystoreCryptoManager @Inject constructor(
 
     fun hasSecret(keyName: String): Boolean = getSecret(keyName).isNotBlank()
 
+    fun deleteSecret(keyName: String) {
+        prefs.edit().remove(keyName).apply()
+        _keysUpdatedVersion.value++
+    }
+
     fun getGeminiKeys(): List<String> {
         val raw = getSecret(KEY_GEMINI_POOL)
         if (raw.isBlank()) return emptyList()
@@ -122,6 +127,32 @@ class KeystoreCryptoManager @Inject constructor(
         saveSecret(KEY_GEMINI_POOL, keys.map { it.trim() }.filter { it.isNotBlank() }.joinToString("\n"))
         geminiRotationIndex = 0
         geminiCooldownUntil.clear()
+    }
+
+    fun addGeminiKey(newKey: String) {
+        val clean = newKey.trim()
+        if (clean.isEmpty()) return
+        val updated = (getGeminiKeys() + clean).distinct()
+        saveGeminiKeys(updated)
+    }
+
+    fun updateGeminiKeyAt(index: Int, updatedKey: String) {
+        val current = getGeminiKeys().toMutableList()
+        if (index !in current.indices) return
+        val clean = updatedKey.trim()
+        if (clean.isEmpty()) {
+            current.removeAt(index)
+        } else {
+            current[index] = clean
+        }
+        saveGeminiKeys(current)
+    }
+
+    fun removeGeminiKeyAt(index: Int) {
+        val current = getGeminiKeys().toMutableList()
+        if (index !in current.indices) return
+        current.removeAt(index)
+        saveGeminiKeys(current)
     }
 
     @Synchronized

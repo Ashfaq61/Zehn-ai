@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.FilterChip
@@ -69,6 +70,8 @@ fun VoiceAndAiModelsScreen(vm: ZehnViewModel) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val onDevice by vm.onDeviceState.collectAsStateWithLifecycle()
     val tunerOut by vm.autoTunerOutput.collectAsStateWithLifecycle()
+    val liveDiscovery by vm.liveModelsDiscovery.collectAsStateWithLifecycle()
+    var customLiveDraft by remember(settings.geminiLiveCustomModel) { mutableStateOf(settings.geminiLiveCustomModel) }
 
     val audioClipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -131,6 +134,53 @@ fun VoiceAndAiModelsScreen(vm: ZehnViewModel) {
                         FilterChip(selected = settings.voiceLanguage == lang, onClick = { vm.setVoiceLanguage(lang) }, label = { Text(lang.label) })
                     }
                 }
+            }
+        }
+
+        // Gemini Live API Native Audio Models
+        item {
+            ClayGlassCard(accentGlow = true) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("Gemini Live Audio Models", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan)
+                    IconButton(onClick = { vm.refreshAvailableLiveModels() }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh Live Models", tint = ZehnColors.Cyan)
+                    }
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("Use Gemini Live Voice Mode", color = ZehnColors.FrostWhite)
+                    ClayToggleSwitch(checked = settings.geminiLiveVoiceEnabled, onCheckedChange = { vm.toggleGeminiLiveVoice(it) })
+                }
+                Text(
+                    text = liveDiscovery.statusMessage,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (liveDiscovery.availableModels.isNotEmpty()) ZehnColors.Emerald else ZehnColors.Amber
+                )
+                if (liveDiscovery.availableModels.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        liveDiscovery.availableModels.forEach { m ->
+                            FilterChip(
+                                selected = settings.geminiLiveModel == m.id && settings.geminiLiveCustomModel.isBlank(),
+                                onClick = { vm.setGeminiLiveModel(m.id) },
+                                label = { Text(m.id) }
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = customLiveDraft,
+                    onValueChange = { customLiveDraft = it },
+                    label = { Text("Custom Gemini Live Model") },
+                    placeholder = { Text(ProviderCatalog.DEFAULT_GEMINI_LIVE_MODEL) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(6.dp))
+                ClayActionButton(
+                    text = "Apply Custom Live Model",
+                    onClick = { vm.setGeminiLiveCustomModel(customLiveDraft) }
+                )
             }
         }
 
@@ -284,8 +334,12 @@ fun VoiceAndAiModelsScreen(vm: ZehnViewModel) {
 @Composable
 fun ApiKeysScreen(vm: ZehnViewModel) {
     val keysVersion by vm.keysVersion.collectAsStateWithLifecycle()
+    val usageMap by vm.providerUsage.collectAsStateWithLifecycle()
+    val testResults by vm.providerTestResults.collectAsStateWithLifecycle()
+    val testingProvider by vm.testingProvider.collectAsStateWithLifecycle()
 
     var geminiPool by remember(keysVersion) { mutableStateOf(vm.crypto.getGeminiKeys().joinToString("\n")) }
+    var newGeminiSlot by remember { mutableStateOf("") }
     var openAiKey by remember(keysVersion) { mutableStateOf(vm.crypto.getSecret(KeystoreCryptoManager.KEY_OPENAI)) }
     var openAiUrl by remember(keysVersion) { mutableStateOf(vm.crypto.getSecret(KeystoreCryptoManager.KEY_OPENAI_URL)) }
     var anthropicKey by remember(keysVersion) { mutableStateOf(vm.crypto.getSecret(KeystoreCryptoManager.KEY_ANTHROPIC)) }
@@ -310,7 +364,7 @@ fun ApiKeysScreen(vm: ZehnViewModel) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Encrypted API Keys", style = MaterialTheme.typography.headlineMedium, color = ZehnColors.FrostWhite)
-                    Text("Android Keystore AES-256-GCM hardware-backed vault", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.Cyan)
+                    Text("Android Keystore AES-256-GCM vault • Add, Edit, Delete & Test", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.Cyan)
                 }
                 ClayToggleSwitch(checked = revealKeys, onCheckedChange = { revealKeys = it })
             }
@@ -321,7 +375,7 @@ fun ApiKeysScreen(vm: ZehnViewModel) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.Security, contentDescription = null, tint = ZehnColors.Cyan)
                     Spacer(Modifier.width(8.dp))
-                    Text("Gemini Key Pool (Auto-Rotation on 429 Quota)", style = MaterialTheme.typography.titleMedium, color = ZehnColors.FrostWhite)
+                    Text("Gemini Key Slots (${vm.crypto.getGeminiKeys().size} active)", style = MaterialTheme.typography.titleMedium, color = ZehnColors.FrostWhite)
                 }
                 Spacer(Modifier.height(6.dp))
                 OutlinedTextField(
@@ -332,23 +386,78 @@ fun ApiKeysScreen(vm: ZehnViewModel) {
                     modifier = Modifier.fillMaxWidth().testTag("api_gemini_pool"),
                     minLines = 2
                 )
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = newGeminiSlot,
+                        onValueChange = { newGeminiSlot = it },
+                        label = { Text("Quick add single slot") },
+                        singleLine = true,
+                        visualTransformation = if (revealKeys) VisualTransformation.None else PasswordVisualTransformation(),
+                        modifier = Modifier.weight(1f)
+                    )
+                    ClayActionButton(text = "Add", onClick = {
+                        vm.addGeminiKeySlot(newGeminiSlot)
+                        newGeminiSlot = ""
+                    })
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ClayActionButton(
+                        text = if (testingProvider == AiProvider.GEMINI) "Testing..." else "Test Gemini",
+                        modifier = Modifier.weight(1f).testTag("test_gemini_button"),
+                        onClick = { vm.testProviderConnection(AiProvider.GEMINI) }
+                    )
+                    ClayActionButton(
+                        text = "Clear Slots",
+                        isDanger = true,
+                        onClick = { vm.deleteProviderSecret(KeystoreCryptoManager.KEY_GEMINI_POOL, "Gemini Keys") }
+                    )
+                }
+                testResults[AiProvider.GEMINI]?.let { res ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(res.message, style = MaterialTheme.typography.labelSmall, color = if (res.connected) ZehnColors.Emerald else ZehnColors.RoseStop)
+                }
             }
         }
 
         item {
             ClayGlassCard {
-                VaultField("OpenAI API Key", openAiKey, revealKeys) { openAiKey = it }
+                VaultSecretRow("OpenAI API Key", openAiKey, revealKeys, AiProvider.OPENAI_COMPATIBLE, testingProvider == AiProvider.OPENAI_COMPATIBLE, testResults[AiProvider.OPENAI_COMPATIBLE], { openAiKey = it }, { vm.testProviderConnection(AiProvider.OPENAI_COMPATIBLE) }) {
+                    openAiKey = ""
+                    vm.deleteProviderSecret(KeystoreCryptoManager.KEY_OPENAI, "OpenAI Key")
+                }
                 VaultField("OpenAI-Compatible Base URL (Optional)", openAiUrl, true) { openAiUrl = it }
-                VaultField("Anthropic Claude Key", anthropicKey, revealKeys) { anthropicKey = it }
-                VaultField("Groq API Key", groqKey, revealKeys) { groqKey = it }
-                VaultField("OpenRouter API Key", openRouterKey, revealKeys) { openRouterKey = it }
-                VaultField("Together AI Key", togetherKey, revealKeys) { togetherKey = it }
-                VaultField("Cohere API Key", cohereKey, revealKeys) { cohereKey = it }
+
+                VaultSecretRow("Groq API Key", groqKey, revealKeys, AiProvider.GROQ, testingProvider == AiProvider.GROQ, testResults[AiProvider.GROQ], { groqKey = it }, { vm.testProviderConnection(AiProvider.GROQ) }) {
+                    groqKey = ""
+                    vm.deleteProviderSecret(KeystoreCryptoManager.KEY_GROQ, "Groq Key")
+                }
+                VaultSecretRow("OpenRouter API Key", openRouterKey, revealKeys, AiProvider.OPENROUTER, testingProvider == AiProvider.OPENROUTER, testResults[AiProvider.OPENROUTER], { openRouterKey = it }, { vm.testProviderConnection(AiProvider.OPENROUTER) }) {
+                    openRouterKey = ""
+                    vm.deleteProviderSecret(KeystoreCryptoManager.KEY_OPENROUTER, "OpenRouter Key")
+                }
+                VaultSecretRow("Hugging Face Token (Inference & Gated Models)", hfToken, revealKeys, AiProvider.HUGGINGFACE, testingProvider == AiProvider.HUGGINGFACE, testResults[AiProvider.HUGGINGFACE], { hfToken = it }, { vm.testProviderConnection(AiProvider.HUGGINGFACE) }) {
+                    hfToken = ""
+                    vm.deleteProviderSecret(KeystoreCryptoManager.KEY_HF_TOKEN, "Hugging Face Token")
+                }
+                VaultSecretRow("Anthropic Claude Key", anthropicKey, revealKeys, AiProvider.ANTHROPIC, testingProvider == AiProvider.ANTHROPIC, testResults[AiProvider.ANTHROPIC], { anthropicKey = it }, { vm.testProviderConnection(AiProvider.ANTHROPIC) }) {
+                    anthropicKey = ""
+                    vm.deleteProviderSecret(KeystoreCryptoManager.KEY_ANTHROPIC, "Anthropic Key")
+                }
+                VaultSecretRow("Together AI Key", togetherKey, revealKeys, AiProvider.TOGETHER, testingProvider == AiProvider.TOGETHER, testResults[AiProvider.TOGETHER], { togetherKey = it }, { vm.testProviderConnection(AiProvider.TOGETHER) }) {
+                    togetherKey = ""
+                    vm.deleteProviderSecret(KeystoreCryptoManager.KEY_TOGETHER, "Together Key")
+                }
+                VaultSecretRow("Cohere API Key", cohereKey, revealKeys, AiProvider.COHERE, testingProvider == AiProvider.COHERE, testResults[AiProvider.COHERE], { cohereKey = it }, { vm.testProviderConnection(AiProvider.COHERE) }) {
+                    cohereKey = ""
+                    vm.deleteProviderSecret(KeystoreCryptoManager.KEY_COHERE, "Cohere Key")
+                }
+
                 VaultField("Ollama Local Server URL", ollamaUrl, true) { ollamaUrl = it }
                 VaultField("Webhook POST Backend URL", webhookUrl, true) { webhookUrl = it }
                 VaultField("Realtime WebSocket URL", realtimeWsUrl, true) { realtimeWsUrl = it }
                 VaultField("Realtime WebSocket Key", realtimeWsKey, revealKeys) { realtimeWsKey = it }
-                VaultField("Hugging Face Token (Gated Models)", hfToken, revealKeys) { hfToken = it }
 
                 Spacer(Modifier.height(12.dp))
                 ClayActionButton(
@@ -373,6 +482,68 @@ fun ApiKeysScreen(vm: ZehnViewModel) {
                     }
                 )
             }
+        }
+
+        if (usageMap.isNotEmpty()) {
+            item {
+                ClayGlassCard {
+                    Text("Live Provider Connection & Usage Telemetry", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan)
+                    Spacer(Modifier.height(6.dp))
+                    usageMap.values.forEach { u ->
+                        Text(
+                            "${u.provider.displayName}: ${u.successes}/${u.requests} ok (${u.lastLatencyMs}ms • HTTP ${u.lastHttpCode}) — ${u.lastStatusText}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (u.failures > u.successes) ZehnColors.Amber else ZehnColors.FrostWhite
+                        )
+                        Spacer(Modifier.height(4.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VaultSecretRow(
+    label: String,
+    value: String,
+    reveal: Boolean,
+    provider: AiProvider,
+    testing: Boolean,
+    testResult: com.zehn.assistant.ai.ProviderConnectionTestResult?,
+    onValueChange: (String) -> Unit,
+    onTest: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                label = { Text(label) },
+                singleLine = true,
+                visualTransformation = if (reveal) VisualTransformation.None else PasswordVisualTransformation(),
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Filled.Delete, contentDescription = "Delete $label", tint = ZehnColors.RoseStop)
+            }
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = testResult?.message ?: "Status: ${if (value.isBlank()) "Not set" else "Saved encrypted"}",
+                style = MaterialTheme.typography.labelSmall,
+                color = when {
+                    testResult?.connected == true -> ZehnColors.Emerald
+                    testResult?.connected == false -> ZehnColors.RoseStop
+                    else -> ZehnColors.SlateMuted
+                },
+                modifier = Modifier.weight(1f)
+            )
+            ClayActionButton(
+                text = if (testing) "..." else "Test",
+                onClick = onTest
+            )
         }
     }
 }

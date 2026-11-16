@@ -344,14 +344,57 @@ fun MissionModeScreen(vm: ZehnViewModel) {
             }
         }
 
+        item {
+            ClayGlassCard {
+                Text("11-App Control & Bilingual Shortcuts", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan)
+                Spacer(Modifier.height(6.dp))
+                val quickGoals = listOf(
+                    "WhatsApp kholo",
+                    "Facebook open karo",
+                    "Open TikTok",
+                    "YouTube par lofi beats search karo",
+                    "Google par weather news search karo",
+                    "Google Maps open karo",
+                    "Open Gallery",
+                    "Open Phone",
+                    "Open Messages",
+                    "Open Settings",
+                    "Front camera open karo",
+                    "Take screenshot",
+                    "Swipe up",
+                    "Close app"
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    quickGoals.forEach { preset ->
+                        AssistChip(
+                            onClick = {
+                                missionInput = preset
+                                vm.runAgentMission(preset)
+                            },
+                            label = { Text(preset) }
+                        )
+                    }
+                }
+            }
+        }
+
         if (planState.goal.isNotBlank()) {
             item {
                 ClayGlassCard {
-                    Text("Live PlanManager • ${planState.path.label}", style = MaterialTheme.typography.labelMedium, color = ZehnColors.Cyan)
+                    Text("Live 6-Stage PlanManager • ${planState.path.label}", style = MaterialTheme.typography.labelMedium, color = ZehnColors.Cyan)
                     Spacer(Modifier.height(4.dp))
                     Text(planState.goal, style = MaterialTheme.typography.titleMedium, color = ZehnColors.FrostWhite)
                     planState.steps.forEach { s ->
-                        Text("${s.index}. [${s.status}] ${s.label}", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.FrostWhite)
+                        Text("${s.index}. [${s.status}] ${s.label}", style = MaterialTheme.typography.bodyMedium, color = when (s.status) {
+                            "DONE" -> ZehnColors.Emerald
+                            "BLOCKED", "FAILED" -> ZehnColors.RoseStop
+                            else -> ZehnColors.FrostWhite
+                        })
                     }
                     if (planState.summary.isNotBlank()) {
                         Spacer(Modifier.height(6.dp))

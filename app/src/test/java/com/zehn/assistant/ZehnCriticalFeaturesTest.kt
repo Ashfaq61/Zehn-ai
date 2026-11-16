@@ -28,11 +28,13 @@ import com.zehn.assistant.security.CrashRecoveryManager
 import com.zehn.assistant.security.KeystoreCryptoManager
 import com.zehn.assistant.security.SafetyPolicyManager
 import com.zehn.assistant.voice.AndroidSttEngine
+import com.zehn.assistant.voice.GeminiLiveAudioClient
 import com.zehn.assistant.voice.LanguageDetector
 import com.zehn.assistant.voice.RealtimeWebSocketClient
 import com.zehn.assistant.voice.SentenceStreamingTtsEngine
 import com.zehn.assistant.voice.SileroStyleVadDetector
 import com.zehn.assistant.voice.VoicePipelineCoordinator
+import com.zehn.assistant.data.model.VoiceProfile
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
@@ -163,11 +165,21 @@ class ZehnCriticalFeaturesTest {
         val agentLoop = AgentLoop(
             IntentClassifier(), PlanManager(), VisionEngine(safetyPolicy), phoneControl, safetyPolicy, db.actionLogDao()
         )
+        val geminiLive = GeminiLiveAudioClient(
+            context = context,
+            okHttpClient = okHttp,
+            crypto = crypto,
+            safetyPolicy = safetyPolicy,
+            agentLoop = agentLoop,
+            phoneControl = phoneControl,
+            actionLogDao = db.actionLogDao()
+        )
         val coordinator = VoicePipelineCoordinator(
             vad = SileroStyleVadDetector(context),
             stt = AndroidSttEngine(context),
             tts = SentenceStreamingTtsEngine(context),
             realtimeWs = RealtimeWebSocketClient(okHttp, crypto),
+            geminiLive = geminiLive,
             aiRouter = router,
             agentLoop = agentLoop,
             prefs = prefs,
@@ -244,5 +256,85 @@ class ZehnCriticalFeaturesTest {
         assertNotNull(reloaded.lastCrashReport.value)
         reloaded.dismissCrashReport()
         assertNull(CrashRecoveryManager(context).lastCrashReport.value)
+    }
+
+    @Test
+    fun `gemini live defaults, models endpoint filtering, candidate ordering, and key redaction`() = runBlocking {
+        val prefs = PreferencesRepository(context)
+        val initial = prefs.settings.first()
+        assertEquals(ProviderCatalog.DEFAULT_GEMINI_LIVE_MODEL, initial.geminiLiveModel)
+        assertEquals(ProviderCatalog.FALLBACK_GEMINI_LIVE_MODEL, initial.geminiLiveFallbackModel)
+
+        val okHttp = OkHttpClient()
+        val phoneControl = PhoneControlExecutor(context, okHttp, safetyPolicy, db.actionLogDao())
+        val agentLoop = AgentLoop(
+            IntentClassifier(), PlanManager(), VisionEngine(safetyPolicy), phoneControl, safetyPolicy, db.actionLogDao()
+        )
+        val geminiLive = GeminiLiveAudioClient(
+            context = context,
+            okHttpClient = okHttp,
+            crypto = crypto,
+            safetyPolicy = safetyPolicy,
+            agentLoop = agentLoop,
+            phoneControl = phoneControl,
+            actionLogDao = db.actionLogDao()
+        )
+
+        val modelsJson = """
+            {
+              "models": [
+                {
+                  "name": "models/gemini-2.5-flash",
+                  "displayName": "Gemini 2.5 Flash",
+                  "supportedGenerationMethods": ["generateContent", "countTokens"]
+                },
+                {
+                  "name": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+                  "displayName": "Gemini 2.5 Flash Native Audio",
+                  "supportedGenerationMethods": ["bidiGenerateContent"]
+                },
+                {
+                  "name": "models/gemini-3.1-flash-live-preview",
+                  "displayName": "Gemini 3.1 Flash Live Preview",
+                  "supportedGenerationMethods": ["bidiGenerateContent"]
+                }
+              ]
+            }
+        """.trimIndent()
+        val parsed = geminiLive.parseLiveModelsResponse(modelsJson)
+        assertEquals(2, parsed.size)
+        assertEquals("gemini-3.1-flash-live-preview", parsed[0].id)
+        assertEquals("gemini-2.5-flash-native-audio-preview-12-2025", parsed[1].id)
+
+        val candidates = geminiLive.buildCandidateModelList(
+            customModel = "custom-live-model",
+            preferredModel = "gemini-3.1-flash-live-preview",
+            fallbackModel = "gemini-2.5-flash-native-audio-preview-12-2025",
+            discoveredModels = parsed,
+            hasVerifiedServerList = true
+        )
+        assertEquals(
+            listOf(
+                "custom-live-model",
+                "gemini-3.1-flash-live-preview",
+                "gemini-2.5-flash-native-audio-preview-12-2025"
+            ),
+            candidates
+        )
+
+        val redacted = geminiLive.sanitizeError("Failed connecting ?key=AIzaSyAbCdEf1234567890 with Bearer secretToken123")
+        assertFalse(redacted.contains("AIzaSyAbCdEf"))
+        assertFalse(redacted.contains("secretToken123"))
+
+        // Calling with empty keys/missing permission never throws
+        val discoveredEmpty = geminiLive.discoverAvailableLiveModels()
+        assertTrue(discoveredEmpty.isEmpty())
+        geminiLive.startLiveSession(
+            personaPrompt = "You are Zehn",
+            voiceProfile = VoiceProfile.ARIA,
+            preferredModel = ProviderCatalog.DEFAULT_GEMINI_LIVE_MODEL,
+            fallbackModel = ProviderCatalog.FALLBACK_GEMINI_LIVE_MODEL,
+            customModel = ""
+        )
     }
 }

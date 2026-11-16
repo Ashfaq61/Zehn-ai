@@ -6,8 +6,11 @@ import com.zehn.assistant.data.db.WorkflowEntity
 import com.zehn.assistant.data.model.ExecutionPath
 import com.zehn.assistant.security.SafetyPolicyManager
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import org.json.JSONObject
@@ -37,16 +40,86 @@ data class ClassifiedIntent(
     val path: ExecutionPath
 )
 
+data class CameraLaunchRequest(
+    val useFrontCamera: Boolean,
+    val isVideoMode: Boolean,
+    val sourceCommand: String
+)
+
 @Singleton
 class IntentClassifier @Inject constructor() {
     fun classify(input: String): ClassifiedIntent {
         val lower = input.lowercase().trim()
         return when {
-            lower.startsWith("open ") || lower.endsWith(" kholo") -> {
-                val app = lower.removePrefix("open ").removeSuffix(" kholo").trim()
+            lower == "stop" || lower == "stop all" || lower == "band karo" || lower == "ruk jao" || lower == "bas karo" -> {
+                ClassifiedIntent("STOP_ALL", "", "", 0.99f, ExecutionPath.FAST_PATH)
+            }
+            lower.contains("front camera") || lower.contains("selfie camera") -> {
+                val isVideo = lower.contains("video") || lower.contains("record")
+                ClassifiedIntent("OPEN_CAMERA_UI", "front", isVideo.toString(), 0.95f, ExecutionPath.FAST_PATH)
+            }
+            lower.contains("back camera") ||
+                ((lower.contains("camera") || lower.contains("photo lo") || lower.contains("take photo") || lower.contains("video record")) &&
+                    (lower.contains("open") || lower.contains("kholo") || lower.contains("lo") || lower.contains("record") || lower.contains("karo"))) -> {
+                val isFront = lower.contains("front") || lower.contains("selfie")
+                val isVideo = lower.contains("video") || lower.contains("record")
+                ClassifiedIntent("OPEN_CAMERA_UI", if (isFront) "front" else "back", isVideo.toString(), 0.94f, ExecutionPath.FAST_PATH)
+            }
+            lower.contains("screenshot") -> {
+                ClassifiedIntent("SCREENSHOT", "", "", 0.94f, ExecutionPath.FAST_PATH)
+            }
+            lower.contains("close app") || lower.contains("app band") || lower.contains("go home") || lower == "home" -> {
+                ClassifiedIntent("CLOSE_OR_HOME", "", "", 0.92f, ExecutionPath.FAST_PATH)
+            }
+            lower == "back" || lower == "go back" || lower == "wapis jao" || lower == "peeche jao" -> {
+                ClassifiedIntent("NAV_BACK", "", "", 0.94f, ExecutionPath.FAST_PATH)
+            }
+            lower.contains("tiktok") && (lower.contains("scroll") || lower.contains("swipe") || lower.contains("next")) -> {
+                ClassifiedIntent("TIKTOK_SCROLL", "", "", 0.91f, ExecutionPath.STANDARD_PATH)
+            }
+            lower.startsWith("open ") || lower.endsWith(" kholo") || lower.endsWith(" open karo") -> {
+                val app = lower
+                    .removePrefix("open ")
+                    .removeSuffix(" open karo")
+                    .removeSuffix(" kholo")
+                    .trim()
                 ClassifiedIntent("OPEN_APP", app, "", 0.94f, ExecutionPath.FAST_PATH)
             }
-            lower.contains("flashlight") || lower.contains("torch") -> {
+            lower.contains("youtube") && (lower.contains("play") || lower.contains("search") || lower.contains("par") || lower.contains("chalao")) -> {
+                val q = lower
+                    .replace("youtube par", "")
+                    .replace("on youtube", "")
+                    .replace("search karo", "")
+                    .replace("search", "")
+                    .replace("play", "")
+                    .replace("chalao", "")
+                    .replace("youtube", "")
+                    .trim()
+                ClassifiedIntent("YOUTUBE", q.ifBlank { "lofi beats" }, "", 0.91f, ExecutionPath.FAST_PATH)
+            }
+            lower.contains("google") && (lower.contains("search") || lower.contains("par") || lower.contains("dhundo")) -> {
+                val q = lower
+                    .replace("google par", "")
+                    .replace("on google", "")
+                    .replace("search karo", "")
+                    .replace("search", "")
+                    .replace("dhundo", "")
+                    .replace("google", "")
+                    .trim()
+                ClassifiedIntent("GOOGLE_SEARCH", q.ifBlank { "weather today" }, "", 0.91f, ExecutionPath.FAST_PATH)
+            }
+            lower.contains("maps") && (lower.contains("search") || lower.contains("par") || lower.contains("directions") || lower.contains("open")) -> {
+                val q = lower
+                    .replace("google maps", "")
+                    .replace("maps par", "")
+                    .replace("on maps", "")
+                    .replace("maps", "")
+                    .replace("open", "")
+                    .replace("karo", "")
+                    .trim()
+                ClassifiedIntent("OPEN_MAPS", q, "", 0.90f, ExecutionPath.FAST_PATH)
+            }
+            lower.contains("flashlight") || lower.contains("torch") || lower.contains("light jalao") || lower.contains("light band") -> {
                 val state = when {
                     lower.contains("on") || lower.contains("jalao") -> "on"
                     lower.contains("off") || lower.contains("band") -> "off"
@@ -57,21 +130,18 @@ class IntentClassifier @Inject constructor() {
             lower.contains("battery") || lower.contains("system status") || lower.contains("ram") || lower.contains("cpu") -> {
                 ClassifiedIntent("SYSTEM_STATUS", "", "", 0.95f, ExecutionPath.FAST_PATH)
             }
-            lower.contains("weather") -> {
+            lower.contains("weather") || lower.contains("mausam") -> {
                 val city = lower.substringAfter("weather in ", "").ifBlank {
                     lower.substringAfter("weather ", "Karachi")
                 }.trim()
                 ClassifiedIntent("WEATHER", city, "", 0.90f, ExecutionPath.FAST_PATH)
             }
-            lower.startsWith("call ") -> {
-                ClassifiedIntent("CALL", lower.removePrefix("call ").trim(), "", 0.92f, ExecutionPath.FAST_PATH)
+            lower.startsWith("call ") || lower.endsWith(" ko call karo") -> {
+                val num = lower.removePrefix("call ").removeSuffix(" ko call karo").trim()
+                ClassifiedIntent("CALL", num, "", 0.92f, ExecutionPath.FAST_PATH)
             }
             lower.startsWith("whatsapp ") -> {
                 ClassifiedIntent("WHATSAPP", "", input, 0.88f, ExecutionPath.FAST_PATH)
-            }
-            lower.contains("youtube") && (lower.contains("play") || lower.contains("search")) -> {
-                val q = lower.replace("play", "").replace("on youtube", "").replace("youtube", "").trim()
-                ClassifiedIntent("YOUTUBE", q.ifBlank { "lofi beats" }, "", 0.90f, ExecutionPath.FAST_PATH)
             }
             lower.contains("spotify") -> {
                 val q = lower.replace("play", "").replace("on spotify", "").replace("spotify", "").trim()
@@ -94,8 +164,8 @@ class IntentClassifier @Inject constructor() {
             lower.contains("clipboard") -> {
                 ClassifiedIntent("CLIPBOARD", "", "", 0.90f, ExecutionPath.FAST_PATH)
             }
-            lower.contains("tap ") || lower.contains("scroll") || lower.contains("type ") || lower.contains("screen") -> {
-                ClassifiedIntent("GUI_AUTOMATION", input, "", 0.72f, ExecutionPath.STANDARD_PATH)
+            lower.contains("tap ") || lower.contains("scroll") || lower.contains("swipe") || lower.contains("type ") || lower.contains("screen") -> {
+                ClassifiedIntent("GUI_AUTOMATION", input, "", 0.78f, ExecutionPath.STANDARD_PATH)
             }
             else -> ClassifiedIntent("LLM_CHAT", input, "", 0.60f, ExecutionPath.FAST_PATH)
         }
@@ -165,6 +235,9 @@ class AgentLoop @Inject constructor(
     private val _recordingActive = MutableStateFlow(false)
     val recordingActive: StateFlow<Boolean> = _recordingActive.asStateFlow()
 
+    private val _cameraLaunchRequests = MutableSharedFlow<CameraLaunchRequest>(extraBufferCapacity = 4)
+    val cameraLaunchRequests: SharedFlow<CameraLaunchRequest> = _cameraLaunchRequests.asSharedFlow()
+
     private val recordedSteps = mutableListOf<String>()
 
     fun startRecordingTask() {
@@ -183,15 +256,24 @@ class AgentLoop @Inject constructor(
     }
 
     suspend fun tryExecuteCommand(input: String): String? {
+        val intent = intentClassifier.classify(input)
+        if (intent.action == "STOP_ALL") {
+            safetyPolicy.triggerEmergencyStop()
+            return "STOP activated — voice, agent tasks, and tools halted immediately."
+        }
         if (safetyPolicy.policy.value.emergencyStopped) {
             return "Emergency STOP is active. Clear STOP in Security or Home before running actions."
         }
         if (_recordingActive.value) {
             recordedSteps.add(input)
         }
-
-        val intent = intentClassifier.classify(input)
         if (intent.action == "LLM_CHAT") return null
+
+        if (intent.action == "TIKTOK_SCROLL") {
+            phoneControl.openApp("tiktok")
+            delay(500)
+            return runGuiLoop("swipe up")
+        }
 
         if (intent.path == ExecutionPath.FAST_PATH && intent.confidence >= 0.85f) {
             planManager.startPlan(
@@ -201,20 +283,41 @@ class AgentLoop @Inject constructor(
                 stepLabels = listOf("Classify Intent (${intent.action})", "Execute Direct Android Fast-Path")
             )
             planManager.updateStep(1, "DONE")
-            val result = executeFastPath(intent)
-            planManager.updateStep(2, if (result.startsWith("Blocked")) "BLOCKED" else "DONE")
+            val result = executeFastPath(intent, input)
+            val status = when {
+                result.startsWith("Blocked", true) -> "BLOCKED"
+                result.contains("failed", true) || result.contains("not installed", true) || result.contains("Unable", true) -> "FAILED"
+                else -> "DONE"
+            }
+            planManager.updateStep(2, status)
             planManager.finishPlan(result)
-            actionLogDao.insert(ActionLogEntity("AGENT_FAST", intent.action, result, "SUCCESS"))
+            actionLogDao.insert(ActionLogEntity("AGENT_FAST", intent.action, result, if (status == "DONE") "SUCCESS" else status))
             return result
         }
 
-        // Standard Path GUI Loop: observe -> analyze -> act -> reflect
         return runGuiLoop(input)
     }
 
-    private suspend fun executeFastPath(intent: ClassifiedIntent): String {
+    private suspend fun executeFastPath(intent: ClassifiedIntent, rawInput: String): String {
         return when (intent.action) {
             "OPEN_APP" -> phoneControl.openApp(intent.param1)
+            "OPEN_CAMERA_UI" -> {
+                val front = intent.param1 == "front"
+                val video = intent.param2.toBoolean()
+                _cameraLaunchRequests.tryEmit(CameraLaunchRequest(front, video, rawInput))
+                "Opened visible Camera preview (${if (front) "front" else "back"} lens${if (video) ", video ready" else ""}). Tap capture to save."
+            }
+            "SCREENSHOT" -> {
+                val svc = ZehnAccessibilityService.instance.value
+                    ?: return "Enable Accessibility Service in Permissions to take screenshots."
+                svc.saveScreenshotToGallery().getOrElse { it.message ?: "Screenshot failed" }
+            }
+            "CLOSE_OR_HOME" -> phoneControl.closeCurrentApp()
+            "NAV_BACK" -> {
+                val svc = ZehnAccessibilityService.instance.value
+                    ?: return "Enable Accessibility Service to press Back."
+                if (svc.performBack()) "Navigated Back." else "Back action failed."
+            }
             "FLASHLIGHT" -> when (intent.param1) {
                 "on" -> phoneControl.toggleFlashlight(true)
                 "off" -> phoneControl.toggleFlashlight(false)
@@ -225,6 +328,8 @@ class AgentLoop @Inject constructor(
             "CALL" -> phoneControl.initiateCall(intent.param1)
             "WHATSAPP" -> phoneControl.sendWhatsApp("", intent.param2.removePrefix("whatsapp").trim())
             "YOUTUBE" -> phoneControl.playYouTube(intent.param1)
+            "GOOGLE_SEARCH" -> phoneControl.searchGoogle(intent.param1)
+            "OPEN_MAPS" -> phoneControl.openMaps(intent.param1)
             "SPOTIFY" -> phoneControl.playSpotify(intent.param1)
             "MEDIA" -> phoneControl.controlMedia(intent.param1)
             "CONNECTIVITY" -> phoneControl.openConnectivityPanel(intent.param1)
@@ -242,11 +347,14 @@ class AgentLoop @Inject constructor(
         }
     }
 
+    /**
+     * 6-stage deterministic UI automation pipeline:
+     * 1. Observe  2. Understand  3. Plan  4. Execute  5. Verify  6. Recover
+     */
     suspend fun runGuiLoop(goal: String): String {
-        val maxSteps = safetyPolicy.policy.value.maxAgentSteps
         val svc = ZehnAccessibilityService.instance.value
         if (svc == null) {
-            val msg = "Standard GUI loop requires Zehn Accessibility Service enabled (see Permissions / Touch Guard)."
+            val msg = "Accessibility Service is disabled. Enable Zehn Accessibility Service in Permissions to run UI automation."
             actionLogDao.insert(ActionLogEntity("AGENT_GUI", "GUI Loop Unavailable", msg, "FAILED"))
             return msg
         }
@@ -254,73 +362,136 @@ class AgentLoop @Inject constructor(
         planManager.startPlan(
             goal = goal,
             path = ExecutionPath.STANDARD_PATH,
-            confidence = 0.72f,
+            confidence = 0.80f,
             stepLabels = listOf(
-                "Capture & Read Active Screen",
-                "Evaluate Safety & Payment Guards",
-                "Execute Accessibility Action",
-                "Reflect & Verify"
+                "1. Observe active UI tree",
+                "2. Understand safety & target semantics",
+                "3. Plan UI action sequence",
+                "4. Execute gesture/accessibility action",
+                "5. Verify post-action screen state",
+                "6. Recover or report truthful outcome"
             )
         )
 
-        var step = 0
-        var lastOutcome = ""
-        while (step < maxSteps && step < 4) {
-            if (safetyPolicy.policy.value.emergencyStopped) {
-                planManager.finishPlan("Aborted by Emergency STOP")
-                return "Mission aborted by Emergency STOP."
+        if (safetyPolicy.policy.value.emergencyStopped) {
+            planManager.finishPlan("Aborted by Emergency STOP")
+            return "Mission aborted by Emergency STOP."
+        }
+
+        // Stage 1: Observe
+        val beforePkg = ZehnAccessibilityService.foregroundPackage.value.orEmpty()
+        val beforeSummary = visionEngine.inspectScreenSummary()
+        if (beforeSummary.startsWith("Screen reading blocked")) {
+            planManager.updateStep(1, "BLOCKED")
+            planManager.finishPlan(beforeSummary)
+            return beforeSummary
+        }
+        planManager.updateStep(1, "DONE")
+
+        // Stage 2: Understand
+        val lower = goal.lowercase().trim()
+        val actionKind = when {
+            lower.contains("scroll down") || lower.contains("swipe up") -> "SCROLL_DOWN"
+            lower.contains("scroll up") || lower.contains("swipe down") -> "SCROLL_UP"
+            lower.contains("swipe left") -> "SWIPE_LEFT"
+            lower.contains("swipe right") -> "SWIPE_RIGHT"
+            lower.startsWith("tap ") || lower.contains("click ") -> "TAP"
+            lower.startsWith("type ") -> "TYPE"
+            lower.contains("recents") -> "RECENTS"
+            else -> "INSPECT"
+        }
+        planManager.updateStep(2, "DONE")
+
+        // Stage 3: Plan
+        if (safetyPolicy.policy.value.emergencyStopped) {
+            planManager.updateStep(3, "BLOCKED")
+            planManager.finishPlan("Aborted by Emergency STOP")
+            return "Aborted by Emergency STOP."
+        }
+        planManager.updateStep(3, "DONE")
+
+        // Stage 4: Execute
+        var executedOk = false
+        var actionDetail = ""
+        when (actionKind) {
+            "SCROLL_DOWN" -> {
+                executedOk = svc.scroll(true)
+                actionDetail = if (executedOk) "Scrolled/swiped forward" else "Forward scroll rejected"
             }
-            step++
-            when (step) {
-                1 -> {
-                    val summary = visionEngine.inspectScreenSummary()
-                    if (summary.startsWith("Screen reading blocked")) {
-                        planManager.updateStep(1, "BLOCKED")
-                        planManager.finishPlan(summary)
-                        return summary
+            "SCROLL_UP" -> {
+                executedOk = svc.scroll(false)
+                actionDetail = if (executedOk) "Scrolled/swiped backward" else "Backward scroll rejected"
+            }
+            "SWIPE_LEFT" -> {
+                executedOk = svc.performSwipe("left")
+                actionDetail = if (executedOk) "Swiped left" else "Swipe left failed"
+            }
+            "SWIPE_RIGHT" -> {
+                executedOk = svc.performSwipe("right")
+                actionDetail = if (executedOk) "Swiped right" else "Swipe right failed"
+            }
+            "RECENTS" -> {
+                executedOk = svc.performRecents()
+                actionDetail = if (executedOk) "Opened Recents" else "Recents failed"
+            }
+            "TAP" -> {
+                val target = goal.substringAfter("tap ", goal.substringAfter("click ", "")).trim()
+                when (val res = svc.tapNodeByText(target)) {
+                    is ZehnAccessibilityService.TapOutcome.Success -> {
+                        executedOk = true
+                        actionDetail = res.message
                     }
-                    lastOutcome = summary
-                    planManager.updateStep(1, "DONE")
-                }
-                2 -> {
-                    planManager.updateStep(2, "DONE")
-                }
-                3 -> {
-                    val lower = goal.lowercase()
-                    val outcome = when {
-                        lower.contains("scroll down") -> if (svc.scroll(true)) "Scrolled down" else "Scroll failed"
-                        lower.contains("scroll up") -> if (svc.scroll(false)) "Scrolled up" else "Scroll failed"
-                        lower.startsWith("tap ") -> {
-                            val target = goal.substringAfter("tap ", "").trim()
-                            when (val res = svc.tapNodeByText(target)) {
-                                is ZehnAccessibilityService.TapOutcome.Success -> res.message
-                                is ZehnAccessibilityService.TapOutcome.Blocked -> {
-                                    planManager.updateStep(3, "BLOCKED")
-                                    planManager.finishPlan(res.reason)
-                                    actionLogDao.insert(ActionLogEntity("SAFETY", "Tap Blocked", res.reason, "BLOCKED"))
-                                    return res.reason
-                                }
-                                is ZehnAccessibilityService.TapOutcome.Failed -> res.reason
-                            }
-                        }
-                        lower.startsWith("type ") -> {
-                            val txt = goal.substringAfter("type ", "").trim()
-                            if (svc.typeTextIntoFocused(txt)) "Typed '$txt'" else "No editable field focused"
-                        }
-                        else -> "Screen inspected: ${lastOutcome.take(180)}"
+                    is ZehnAccessibilityService.TapOutcome.Blocked -> {
+                        planManager.updateStep(4, "BLOCKED")
+                        planManager.updateStep(5, "BLOCKED")
+                        planManager.updateStep(6, "BLOCKED")
+                        planManager.finishPlan(res.reason)
+                        actionLogDao.insert(ActionLogEntity("SAFETY", "Tap Blocked", res.reason, "BLOCKED"))
+                        return res.reason
                     }
-                    lastOutcome = outcome
-                    planManager.updateStep(3, "DONE")
+                    is ZehnAccessibilityService.TapOutcome.Failed -> {
+                        executedOk = false
+                        actionDetail = res.reason
+                    }
                 }
-                4 -> {
-                    delay(150)
-                    planManager.updateStep(4, "DONE")
-                }
+            }
+            "TYPE" -> {
+                val txt = goal.substringAfter("type ", "").trim()
+                executedOk = svc.typeTextIntoFocused(txt)
+                actionDetail = if (executedOk) "Typed text into focused field" else "No non-password editable field focused"
+            }
+            else -> {
+                executedOk = true
+                actionDetail = "Observed screen: ${beforeSummary.take(180)}"
             }
         }
-        actionLogDao.insert(ActionLogEntity("AGENT_GUI", goal.take(48), lastOutcome, "SUCCESS"))
-        planManager.finishPlan(lastOutcome)
-        return lastOutcome
+        planManager.updateStep(4, if (executedOk) "DONE" else "FAILED")
+
+        // Stage 5: Verify
+        delay(220)
+        val afterPkg = ZehnAccessibilityService.foregroundPackage.value.orEmpty()
+        val afterSummary = visionEngine.inspectScreenSummary()
+        val stateChanged = (afterPkg != beforePkg) || (afterSummary != beforeSummary)
+        val verified = executedOk && (actionKind == "INSPECT" || stateChanged || actionKind.startsWith("SWIPE") || actionKind.startsWith("SCROLL"))
+        planManager.updateStep(5, if (verified) "DONE" else "FAILED")
+
+        // Stage 6: Recover if needed
+        var finalSummary = actionDetail
+        if (!verified && (actionKind == "SCROLL_DOWN" || actionKind == "SCROLL_UP")) {
+            val recoveryOk = svc.performSwipe(if (actionKind == "SCROLL_DOWN") "up" else "down")
+            planManager.updateStep(6, if (recoveryOk) "DONE" else "FAILED")
+            finalSummary = if (recoveryOk) "$actionDetail (recovered via gesture swipe)" else "Failed: screen did not respond to scroll or swipe."
+        } else {
+            planManager.updateStep(6, if (verified) "DONE" else "FAILED")
+            if (!verified) {
+                finalSummary = "Verification failed: $actionDetail (UI state unchanged)"
+            }
+        }
+
+        val logStatus = if (verified || finalSummary.contains("recovered")) "SUCCESS" else "FAILED"
+        actionLogDao.insert(ActionLogEntity("AGENT_GUI", goal.take(48), finalSummary, logStatus))
+        planManager.finishPlan(finalSummary)
+        return finalSummary
     }
 
     suspend fun executeWorkflowOrFlow(workflow: WorkflowEntity): String {
@@ -345,7 +516,6 @@ class AgentLoop @Inject constructor(
                 }
             }
         } else {
-            // Fixed YAML-style instant replay without LLM
             workflow.definitionText.lines().forEach { line ->
                 val trimmed = line.trim()
                 when {
