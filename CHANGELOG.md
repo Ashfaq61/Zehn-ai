@@ -1,43 +1,28 @@
-# CHANGELOG — MAHI / Zehn AI V3.3
+# CHANGELOG — Zehn AI (`com.zehn.assistant`)
 
-All changes below were built on top of the existing `com.zehn.assistant` project, preserving `applicationId`, package structure, Room schema continuity, Android Keystore vault compatibility, and Material 3 Clay/Glass UI.
+## V4.0 — Autonomous GitHub Research, Self-Upgrade & APK Build Engine
+
+### Added
+- **Autonomous GitHub & Hugging Face Research Agent (`AutonomousResearchAgent`)**:
+  - Covers 14 GitHub capability domains (Android AI assistants, voice, AccessibilityService, screen/computer-use, AI call/Telecom/InCallService, MCP tools, agent frameworks, RAG/memory, vision/OCR, STT/TTS, offline LLMs, UI automation, security/performance) plus 6 Hugging Face model tracks (Urdu ASR, multilingual TTS, lightweight LLMs, vision/OCR, LiteRT/on-device).
+  - Decodes repository README & Gradle/package specs to extract actual `minSdk`, dependencies, licenses, RAM/storage/battery estimates, and multi-factor compatibility scores without judging only by star counts.
+  - Persists evaluated tools in Room `discovered_tools` (`ZehnDatabase` v2 with safe `MIGRATION_1_2`) so repositories are not repeatedly re-evaluated.
+- **Safety, License, Duplicate & Approval Analyzer (`RepoSafetyAnalyzer`)**:
+  - Audits SPDX licenses, scans diffs for leaked tokens (`ghp_`, `github_pat_`, `AIza`, `sk-`, `gsk_`, `hf_`), blocks external DCL/malware/oversized files/workflow edits (`allowWorkflowEdits` default OFF), detects duplicate built-in capabilities, and gates sensitive permissions/accessibility/call/security/manifest changes behind user approval.
+- **GitHub Auto-Dev Integration Engine (`GitHubAutoDevEngine`)**:
+  - Securely authenticates using encrypted Keystore PAT (`KEY_GITHUB_TOKEN`, never embedded or logged), monitors repo permissions, creates isolated `zehn-auto/...` branches (never committing directly to `main`), performs atomic Git Data API commits, opens PRs, polls GitHub Actions builds + downloads failed job log tails for bounded self-repair diagnostics (max 5 attempts), supports approval-gated merges, and rolls back branches to stable commit SHAs.
+- **Release & Update Notification Manager (`ReleaseUpdateManager`)**:
+  - Monitors published GitHub Releases, verifies device compatibility & trusted GitHub URLs, records release history for rollback, requests `POST_NOTIFICATIONS` on Android 13+, posts `CHANNEL_UPDATES` notifications with version/changelog/APK size, and launches the verified download URL so the user completes Android's standard installation confirmation.
+- **Autonomous Scheduler (`UpgradeScheduler`, `ResearchScheduleWorker`, `ReleaseCheckWorker`)**:
+  - Supports configurable `DAILY`, `WEEKLY`, and `MANUAL` schedules plus `SECURITY_ONLY` / `ALL_AI_TOOLS` focus filters, pause/resume controls, battery-not-low & connected-network constraints, and periodic release checks via WorkManager.
+- **Autonomous Upgrade Center (`AutonomousUpgradeCenterScreen`)**:
+  - Added full control dashboard in Hub (`upgrade_center`) displaying live connection status, research metrics, last/next scan dates, discovered/approved/integrated/passed-CI counts, latest APK version, GitHub configuration, all 10 control buttons, proposals review queue, release history, rollback button, and local API audit log.
+- **Upgraded CI/CD (`.github/workflows/android-build.yml`)**:
+  - Added `zehn-auto/**` branch CI triggers, `lintDebug`, `:app:dependencies` audit, `aapt2 dump badging` package validation (`com.zehn.assistant`), dynamic `ZEHN_VERSION_CODE` / `ZEHN_VERSION_NAME`, build/test/lint artifact archival, optional signed `assembleRelease`, and safe GitHub Release publishing (`overwrite_files: false`).
+- **Acceptance Test Suite (`ZehnV40AutonomousUpgradeTest`)**:
+  - Added 4 end-to-end Robolectric + stateful OkHttp interceptor acceptance tests; total automated tests passing increased to **23 / 23**.
 
 ---
 
 ## V3.3 — Autonomous Android Assistant Upgrade
-
-### Security & Stability Fixes
-- **Strict HTTPS Network Policy**: Replaced `usesCleartextTraffic="true"` with `usesCleartextTraffic="false"` and `res/xml/network_security_config.xml`, restricting cleartext traffic solely to local loopback (`127.0.0.1`, `localhost`).
-- **Gemini Header Authentication**: Moved Gemini API keys out of URL query strings (`?key=`) into the `x-goog-api-key` HTTP header across chat, vision, and Imagen calls.
-- **Expanded Token Sanitization**: Added `gsk_` (Groq) alongside `AIza`, `sk-`, `hf_`, and `Bearer` redaction in `CloudLlmClient.sanitizeError` and `CrashRecoveryManager`.
-- **Accessibility Password & OTP Guard**: Blocked reading or injecting text into password, passcode, PIN, and OTP fields inside `ZehnAccessibilityService`.
-- **Low-RAM On-Device Model Protection**: Guarded on-device model execution with a `Mutex` and `4096 MB` device RAM check in `AiEngineRouter`, preventing out-of-memory crashes on low-RAM handsets.
-- **Release Debuggability Hardening**: Explicitly set `isDebuggable = false` in the Gradle `release` build type.
-
-### Advanced AI Brain & Discovery
-- **Hugging Face Provider Support**: Added `AiProvider.HUGGINGFACE` with OpenAI-compatible router inference (`Qwen2.5-72B-Instruct`, `Llama-3.3-70B-Instruct`, `gemma-3-27b-it`) and encrypted `KEY_HF_TOKEN` storage.
-- **Live Provider Testing & Usage Telemetry**: Added real per-provider `testProviderConnection` HTTP probes measuring latency/status and live `providerUsage` counters (`requests`, `successes`, `failures`, `lastLatencyMs`).
-- **Full Key Slot Management**: Added single-slot Add, Update, Test, and Delete controls for Gemini API key rotation pool and all other provider keys in `KeystoreCryptoManager` & `ApiKeysScreen`.
-- **Safe Open-Source Discovery (`OpenSourceDiscoveryClient`)**: Added read-only GitHub repository and Hugging Face model discovery with SPDX license assessment and device RAM compatibility labels.
-
-### Bilingual Voice Control & Automation Agent
-- **English / Urdu / Hindi / Roman Urdu Expansion**: Added bilingual intent classification (`"WhatsApp kholo"`, `"YouTube par ... search karo"`, `"Google par ... search karo"`, `"Front camera open karo"`, `"TikTok scroll karo"`, `"stop"` / `"band karo"` / `"ruk jao"`).
-- **Continuous Conversation Loop**: Added opt-in `continuousConversationEnabled` auto-relisten after TTS replies plus bounded transient STT retries and immediate voice stop detection in `VoicePipelineCoordinator`.
-- **11+ App Package Queries & Agent Shortcuts**: Expanded `<queries>` and `PhoneControlExecutor` aliases for WhatsApp, Facebook/Lite, TikTok, YouTube, Instagram, Spotify, Google Maps, Google Search, Chrome, Gmail, Gallery/Photos, Dialer, Messages, Settings, and Camera.
-- **6-Stage Accessibility Loop & Gesture Extensions**: Upgraded `AgentLoop` (`Observe -> Understand -> Plan -> Execute -> Verify -> Recover`) with `performSwipe`, `performRecents`, and `saveScreenshotToGallery` (`Pictures/MahiZehnAI` on API 28+).
-
-### CameraX Vision & Call Assistant
-- **Full Camera Vision Dialog (`CameraOcrSheet`)**: Added Front/Back camera toggle, Flash/Torch toggle, MediaStore Photo capture, MediaStore Video recording (with `RECORD_AUDIO` check), visible status pill, and ML Kit OCR/QR scanning.
-- **Call Screening & Auto-Answer (`ZehnCallScreeningService`, `CallAssistantManager`)**: Added Android 10+ `CallScreeningService`, VIP caller detection (by contact name or trailing phone digits), configurable countdown auto-answer timer, SMS auto-reply on reject, call interaction log, and honest `CallCapabilityReport`.
-- **New Screens (`CallAndDiscoveryScreens.kt`)**: Added Call Assistant console, Open-Source Discovery browser, and real-time System Diagnostics screen in Hub navigation.
-
-### CI/CD & Testing
-- **Automated CI/CD (`.github/workflows/android-build.yml`)**: Runs JDK 17 + unit/Robolectric tests (`testDebugUnitTest`), debug APK build & size verification, optional keystore-signed release build, artifact uploads, and tag-triggered GitHub Releases.
-- **Expanded Robolectric Verification**: Added `ZehnV33FeaturesTest` bringing total passing automated JVM/Robolectric tests to **19 / 19**.
-
----
-
-## Known Android OS & Hardware Limitations
-- **Cellular Uplink Audio Injection**: Standard non-root Android apps cannot inject assistant TTS audio directly into the modem call uplink microphone; documented transparently in `CallCapabilityReport` and UI.
-- **Force-Closing Other Apps**: Android prohibits third-party apps from force-stopping foreground packages; app-close voice actions safely minimize to Home via Accessibility Service.
-- **Headless Hardware Limits**: Live Gemini WebSocket audio, physical CameraX lenses, and live telephony screening require a real Android device for end-to-end manual QA.
+*(Preserved in full: HTTPS network security config, Gemini `x-goog-api-key` headers, Hugging Face Inference Router, key-slot CRUD + latency/usage metrics, bilingual English/Urdu/Hindi/Roman Urdu voice commands, Continuous Conversation mode, CameraX photo/video/flash/lens flip, Call Screening + VIP filter + Auto-Answer + CallCapabilityReport, Open-Source Discovery UI, and Honest Diagnostics.)*

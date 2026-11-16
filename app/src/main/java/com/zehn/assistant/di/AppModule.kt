@@ -8,6 +8,7 @@ import com.zehn.assistant.data.db.MessageDao
 import com.zehn.assistant.data.db.ProjectRagDao
 import com.zehn.assistant.data.db.SkillDao
 import com.zehn.assistant.data.db.TriggerDao
+import com.zehn.assistant.data.db.UpgradeCenterDao
 import com.zehn.assistant.data.db.WorkflowDao
 import com.zehn.assistant.data.db.ZehnDatabase
 import dagger.Module
@@ -64,4 +65,5 @@ object AppModule {
     @Provides fun provideWorkflowDao(db: ZehnDatabase): WorkflowDao = db.workflowDao()
     @Provides fun provideTriggerDao(db: ZehnDatabase): TriggerDao = db.triggerDao()
     @Provides fun provideActionLogDao(db: ZehnDatabase): ActionLogDao = db.actionLogDao()
+    @Provides fun provideUpgradeCenterDao(db: ZehnDatabase): UpgradeCenterDao = db.upgradeCenterDao()
 }

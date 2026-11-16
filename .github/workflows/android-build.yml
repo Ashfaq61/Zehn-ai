@@ -1,26 +1,28 @@
-name: Mahi & Zehn AI Android CI/CD
+name: Zehn AI V4.0 Autonomous Build & Release Engine
 
 on:
   push:
     branches:
       - main
+      - 'zehn-auto/**'
     tags:
       - 'v*'
   pull_request:
     branches:
       - main
+      - 'zehn-auto/**'
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build_and_test:
-    name: Test, Build APK & Conditional Release
+  verify_and_build:
+    name: Test, Lint, Dependency Audit & Signed APK Build
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -55,37 +57,62 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Run Unit & Robolectric Tests + Assemble Debug APK
+      - name: Compute Release Version Metadata
+        id: ver
         run: |
-          if [ -x "./gradlew" ]; then
-            ./gradlew clean testDebugUnitTest assembleDebug --stacktrace
+          RUN_CODE=$((100 + GITHUB_RUN_NUMBER))
+          TAG_NAME="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           else
-            gradle clean testDebugUnitTest assembleDebug --stacktrace
+            echo "version_name=4.0.$RUN_CODE" >> "$GITHUB_OUTPUT"
           fi
+          echo "version_code=$RUN_CODE" >> "$GITHUB_OUTPUT"
 
-      - name: Verify Debug APK exists and is non-empty
+      - name: Check Dependencies, Unit Tests & Lint
+        run: |
+          GRADLE_CMD="gradle"
+          if [ -x "./gradlew" ]; then GRADLE_CMD="./gradlew"; fi
+          $GRADLE_CMD :app:dependencies --configuration releaseRuntimeClasspath > build-dependencies.txt
+          $GRADLE_CMD testDebugUnitTest lintDebug assembleDebug \
+            -PZEHN_VERSION_CODE=${{ steps.ver.outputs.version_code }} \
+            -PZEHN_VERSION_NAME=${{ steps.ver.outputs.version_name }} \
+            --stacktrace | tee gradle-build.log
+
+      - name: Verify Package Name & Debug APK
         run: |
           APK_PATH=$(find app/build/outputs/apk/debug -maxdepth 1 -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ] || [ ! -s "$APK_PATH" ]; then
             echo "Debug APK was not generated or is empty."
             exit 1
           fi
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -n 1)
+          if [ -n "$AAPT2" ]; then
+            BADGING=$("$AAPT2" dump badging "$APK_PATH" | head -n 2)
+            echo "$BADGING"
+            echo "$BADGING" | grep -q "name='com.zehn.assistant'"
+          fi
           ls -lh "$APK_PATH"
-          sha256sum "$APK_PATH"
+          sha256sum "$APK_PATH" | tee apk-checksums.txt
 
-      - name: Upload Test Reports
+      - name: Upload Test, Lint & Build Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mahi-zehn-test-reports
-          path: app/build/reports/tests/testDebugUnitTest/
+          name: zehn-v4-build-logs-and-reports
+          path: |
+            gradle-build.log
+            build-dependencies.txt
+            apk-checksums.txt
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/reports/lint-results-debug.*
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Upload Debug APK Artifact
+      - name: Upload Verified Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: mahi-zehn-debug-apk
+          name: zehn-ai-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
@@ -103,7 +130,7 @@ jobs:
             echo "$B64" | base64 --decode > my-upload-key.jks
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Release signing secrets not configured; skipping signed release build."
+            echo "Release signing secrets not configured; skipping signed release APK."
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -114,33 +141,41 @@ jobs:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [ -x "./gradlew" ]; then
-            ./gradlew assembleRelease --stacktrace
-          else
-            gradle assembleRelease --stacktrace
-          fi
+          GRADLE_CMD="gradle"
+          if [ -x "./gradlew" ]; then GRADLE_CMD="./gradlew"; fi
+          $GRADLE_CMD assembleRelease \
+            -PZEHN_VERSION_CODE=${{ steps.ver.outputs.version_code }} \
+            -PZEHN_VERSION_NAME=${{ steps.ver.outputs.version_name }} \
+            --stacktrace
 
       - name: Cleanup Release Keystore
         if: always() && steps.release_signing.outputs.enabled == 'true'
         run: rm -f my-upload-key.jks
 
-      - name: Upload Signed Release APK Artifact
+      - name: Upload Signed Release APK
         if: steps.release_signing.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: mahi-zehn-release-apk
+          name: zehn-ai-release-apk
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish GitHub Release on Tag
+      - name: Publish Verified GitHub Release on Tag
         if: startsWith(github.ref, 'refs/tags/v') && success()
         uses: softprops/action-gh-release@v2
         with:
+          name: Zehn AI ${{ github.ref_name }}
+          body: |
+            Verified automated APK release built by GitHub Actions.
+            - versionCode: ${{ steps.ver.outputs.version_code }}
+            - versionName: ${{ steps.ver.outputs.version_name }}
+            - Previous releases remain intact for rollback (`overwrite_files: false`).
           generate_release_notes: true
           overwrite_files: false
           files: |
             app/build/outputs/apk/debug/*.apk
             app/build/outputs/apk/release/*.apk
+            apk-checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

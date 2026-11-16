@@ -207,5 +207,6 @@ class KeystoreCryptoManager @Inject constructor(
         const val KEY_REALTIME_WS_URL = "realtime_ws_url"
         const val KEY_REALTIME_WS_KEY = "realtime_ws_key"
         const val KEY_HF_TOKEN = "huggingface_token"
+        const val KEY_GITHUB_TOKEN = "github_pat_token"
     }
 }

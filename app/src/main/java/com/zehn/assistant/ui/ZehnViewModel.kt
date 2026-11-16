@@ -34,18 +34,23 @@ import com.zehn.assistant.data.PreferencesRepository
 import com.zehn.assistant.data.ZehnSettings
 import com.zehn.assistant.data.db.ActionLogDao
 import com.zehn.assistant.data.db.ActionLogEntity
+import com.zehn.assistant.data.db.AutoDevRunEntity
 import com.zehn.assistant.data.db.ConversationDao
 import com.zehn.assistant.data.db.ConversationEntity
+import com.zehn.assistant.data.db.DiscoveredToolEntity
 import com.zehn.assistant.data.db.MemoryDao
 import com.zehn.assistant.data.db.MemoryEntity
 import com.zehn.assistant.data.db.MessageDao
 import com.zehn.assistant.data.db.MessageEntity
 import com.zehn.assistant.data.db.ProjectEntity
 import com.zehn.assistant.data.db.ProjectRagDao
+import com.zehn.assistant.data.db.ReleaseRecordEntity
 import com.zehn.assistant.data.db.SkillDao
 import com.zehn.assistant.data.db.SkillEntity
 import com.zehn.assistant.data.db.TriggerDao
 import com.zehn.assistant.data.db.TriggerEntity
+import com.zehn.assistant.data.db.UpgradeCenterDao
+import com.zehn.assistant.data.db.UpgradeProposalEntity
 import com.zehn.assistant.data.db.WorkflowDao
 import com.zehn.assistant.data.db.WorkflowEntity
 import com.zehn.assistant.data.model.AiExecutionMode
@@ -63,6 +68,13 @@ import com.zehn.assistant.security.KeystoreCryptoManager
 import com.zehn.assistant.security.PendingConfirmationRequest
 import com.zehn.assistant.security.SafetyPolicyManager
 import com.zehn.assistant.security.SafetyPolicyState
+import com.zehn.assistant.upgrade.AutoDevExecutionState
+import com.zehn.assistant.upgrade.AutonomousResearchAgent
+import com.zehn.assistant.upgrade.GitHubAutoDevEngine
+import com.zehn.assistant.upgrade.GitHubConnectionStatus
+import com.zehn.assistant.upgrade.ReleaseUpdateManager
+import com.zehn.assistant.upgrade.ResearchCycleSummary
+import com.zehn.assistant.upgrade.UpgradeScheduler
 import com.zehn.assistant.voice.LanguageDetector
 import com.zehn.assistant.voice.LiveChatTranscriptEvent
 import com.zehn.assistant.voice.LiveModelsDiscoveryState
@@ -108,7 +120,12 @@ class ZehnViewModel @Inject constructor(
     val phoneControl: PhoneControlExecutor,
     val callAssistant: CallAssistantManager,
     private val backupManager: BackupManager,
-    private val crashRecoveryManager: CrashRecoveryManager
+    private val crashRecoveryManager: CrashRecoveryManager,
+    private val upgradeCenterDao: UpgradeCenterDao,
+    private val researchAgent: AutonomousResearchAgent,
+    private val autoDevEngine: GitHubAutoDevEngine,
+    private val releaseUpdateManager: ReleaseUpdateManager,
+    private val upgradeScheduler: UpgradeScheduler
 ) : AndroidViewModel(app) {
 
     val settings: StateFlow<ZehnSettings> = prefs.settings.stateIn(
@@ -163,6 +180,22 @@ class ZehnViewModel @Inject constructor(
 
     val actionLogs: StateFlow<List<ActionLogEntity>> = actionLogDao.observeRecent()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val discoveredTools: StateFlow<List<DiscoveredToolEntity>> = upgradeCenterDao.observeDiscoveredTools()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val upgradeProposals: StateFlow<List<UpgradeProposalEntity>> = upgradeCenterDao.observeProposals()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val devRunHistory: StateFlow<List<AutoDevRunEntity>> = upgradeCenterDao.observeDevRuns()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val releaseHistory: StateFlow<List<ReleaseRecordEntity>> = upgradeCenterDao.observeReleases()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val researchState: StateFlow<ResearchCycleSummary> = researchAgent.state
+    val githubConnection: StateFlow<GitHubConnectionStatus> = autoDevEngine.connection
+    val autoDevState: StateFlow<AutoDevExecutionState> = autoDevEngine.devState
 
     private val _selectedProjectId = MutableStateFlow<Long?>(null)
     val selectedProjectId: StateFlow<Long?> = _selectedProjectId.asStateFlow()
@@ -807,5 +840,148 @@ class ZehnViewModel @Inject constructor(
             onSuccess = { count -> "Imported $count items successfully" },
             onFailure = { "Invalid backup JSON: ${it.message}" }
         )
+    }
+
+    // ---- V4.0 Autonomous GitHub Research, Self-Upgrade & APK Build Actions ----
+
+    fun saveGitHubConfig(repoSlug: String, baseBranch: String, tokenDraft: String) = viewModelScope.launch {
+        if (tokenDraft.isNotBlank()) {
+            crypto.saveSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN, tokenDraft.trim())
+        }
+        prefs.updateSettings {
+            it.copy(
+                githubRepoSlug = repoSlug.trim(),
+                githubBaseBranch = baseBranch.trim().ifBlank { "main" }
+            )
+        }
+        _toastBanner.value = "Saved encrypted GitHub settings"
+    }
+
+    fun testGitHubConnection(repoSlug: String, baseBranch: String, tokenDraft: String) = viewModelScope.launch {
+        if (tokenDraft.isNotBlank()) {
+            crypto.saveSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN, tokenDraft.trim())
+        }
+        prefs.updateSettings {
+            it.copy(
+                githubRepoSlug = repoSlug.trim(),
+                githubBaseBranch = baseBranch.trim().ifBlank { "main" }
+            )
+        }
+        val status = autoDevEngine.testConnection(repoSlug)
+        _toastBanner.value = status.message
+    }
+
+    fun deleteGitHubToken() {
+        crypto.deleteSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN)
+        _toastBanner.value = "GitHub PAT deleted from Keystore"
+    }
+
+    fun updateAutoDevSafetyFlags(
+        autoDevEnabled: Boolean,
+        autoMergeOnGreen: Boolean,
+        allowWorkflowEdits: Boolean,
+        notifyUpdateReady: Boolean,
+        notifyBuildFailure: Boolean
+    ) = viewModelScope.launch {
+        prefs.updateSettings {
+            it.copy(
+                autoDevEnabled = autoDevEnabled,
+                autoMergeOnGreen = autoMergeOnGreen,
+                allowWorkflowEdits = allowWorkflowEdits,
+                notifyOnUpdateReady = notifyUpdateReady,
+                notifyOnBuildFailure = notifyBuildFailure
+            )
+        }
+        _toastBanner.value = "Updated Auto-Dev safety rules"
+    }
+
+    fun updateResearchSchedule(mode: String, focusMode: String, paused: Boolean) = viewModelScope.launch {
+        upgradeScheduler.applySchedule(mode, focusMode, paused)
+        _toastBanner.value = if (paused) "Scheduled research paused" else "Research schedule: $mode ($focusMode)"
+    }
+
+    fun startResearch(
+        includeGitHub: Boolean = true,
+        includeHuggingFace: Boolean = true,
+        customQuery: String? = null
+    ) = viewModelScope.launch {
+        val res = researchAgent.runFullResearchCycle(
+            includeGitHub = includeGitHub,
+            includeHuggingFace = includeHuggingFace,
+            customQuery = customQuery
+        )
+        _toastBanner.value = res.fold(
+            onSuccess = { s -> "Found ${s.newlyDiscoveredCount} new tools, ${s.proposalsCreatedCount} integration plans" },
+            onFailure = { err -> err.message ?: "Research failed" }
+        )
+    }
+
+    fun stopResearchAndAutoDev() {
+        researchAgent.stopResearch()
+        autoDevEngine.stopAll()
+        _toastBanner.value = "Autonomous Research & Auto-Dev stopped immediately"
+    }
+
+    fun approveProposalAndStage(proposalId: Long, stageToGitHub: Boolean = true) = viewModelScope.launch {
+        upgradeCenterDao.updateProposalStatus(proposalId, "APPROVED")
+        if (!stageToGitHub) {
+            _toastBanner.value = "Proposal #$proposalId marked APPROVED"
+            return@launch
+        }
+        val res = autoDevEngine.executeIntegrationProposal(
+            proposalId = proposalId,
+            onBuildFailureNotify = { err -> releaseUpdateManager.showBuildFailureNotification(err) }
+        )
+        _toastBanner.value = res.fold(
+            onSuccess = { p -> "Staged branch ${p.branchName} (${p.status})" },
+            onFailure = { err -> err.message ?: "Staging failed" }
+        )
+    }
+
+    fun rejectProposal(proposalId: Long) = viewModelScope.launch {
+        upgradeCenterDao.updateProposalStatus(proposalId, "REJECTED")
+        _toastBanner.value = "Proposal #$proposalId rejected"
+    }
+
+    fun triggerBuildApk(branchOverride: String? = null) = viewModelScope.launch {
+        val res = autoDevEngine.triggerGitHubActionsBuild(branchOverride)
+        _toastBanner.value = res.fold(
+            onSuccess = { it },
+            onFailure = { err -> err.message ?: "Unable to start GitHub Actions build" }
+        )
+    }
+
+    fun pollBuildStatus() = viewModelScope.launch {
+        val res = autoDevEngine.pollLatestActionsRun()
+        _toastBanner.value = res.fold(
+            onSuccess = { b -> "Build #${b.runId}: ${b.status} / ${b.conclusion.ifBlank { "running" }}" },
+            onFailure = { err -> err.message ?: "Poll failed" }
+        )
+    }
+
+    fun checkForApkUpdates() = viewModelScope.launch {
+        val res = releaseUpdateManager.checkForVerifiedReleaseUpdate(notifyIfNewer = true)
+        _toastBanner.value = res.fold(
+            onSuccess = { it.statusMessage },
+            onFailure = { err -> err.message ?: "Release check failed" }
+        )
+    }
+
+    fun openReleaseDownload(release: ReleaseRecordEntity) {
+        if (!releaseUpdateManager.openVerifiedUpdateInBrowser(release)) {
+            _toastBanner.value = "Release URL is missing or failed trusted GitHub origin check"
+        }
+    }
+
+    fun restorePreviousVersion(branchToReset: String? = null) = viewModelScope.launch {
+        val res = autoDevEngine.rollbackBranchToStable(branchToReset)
+        _toastBanner.value = res.fold(
+            onSuccess = { it },
+            onFailure = { err -> err.message ?: "Rollback failed" }
+        )
+    }
+
+    fun clearDevRunHistory() = viewModelScope.launch {
+        upgradeCenterDao.clearDevRuns()
     }
 }

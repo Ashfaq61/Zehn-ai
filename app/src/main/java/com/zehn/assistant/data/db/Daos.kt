@@ -178,3 +178,55 @@ interface ActionLogDao {
     @Query("DELETE FROM action_logs")
     suspend fun clearAll()
 }
+
+@Dao
+interface UpgradeCenterDao {
+    @Query("SELECT * FROM discovered_tools ORDER BY evaluatedAt DESC LIMIT 200")
+    fun observeDiscoveredTools(): Flow<List<DiscoveredToolEntity>>
+
+    @Query("SELECT * FROM discovered_tools WHERE identifier = :identifier LIMIT 1")
+    suspend fun findDiscoveredTool(identifier: String): DiscoveredToolEntity?
+
+    @Query("SELECT COUNT(*) FROM discovered_tools")
+    suspend fun countDiscoveredTools(): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertDiscoveredTool(tool: DiscoveredToolEntity): Long
+
+    @Query("SELECT * FROM upgrade_proposals ORDER BY updatedAt DESC LIMIT 100")
+    fun observeProposals(): Flow<List<UpgradeProposalEntity>>
+
+    @Query("SELECT * FROM upgrade_proposals WHERE id = :id LIMIT 1")
+    suspend fun getProposalById(id: Long): UpgradeProposalEntity?
+
+    @Query("SELECT * FROM upgrade_proposals WHERE toolIdentifier = :toolId LIMIT 1")
+    suspend fun findProposalByTool(toolId: String): UpgradeProposalEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertProposal(proposal: UpgradeProposalEntity): Long
+
+    @Query("UPDATE upgrade_proposals SET status = :status, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateProposalStatus(id: Long, status: String, updatedAt: Long = System.currentTimeMillis())
+
+    @Query("SELECT * FROM dev_run_history ORDER BY timestamp DESC LIMIT 200")
+    fun observeDevRuns(): Flow<List<AutoDevRunEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDevRun(run: AutoDevRunEntity): Long
+
+    @Query("DELETE FROM dev_run_history")
+    suspend fun clearDevRuns()
+
+    @Query("SELECT * FROM release_history ORDER BY detectedAt DESC LIMIT 50")
+    fun observeReleases(): Flow<List<ReleaseRecordEntity>>
+
+    @Query("SELECT * FROM release_history WHERE tagName = :tagName LIMIT 1")
+    suspend fun findReleaseByTag(tagName: String): ReleaseRecordEntity?
+
+    @Query("SELECT * FROM release_history ORDER BY detectedAt DESC LIMIT 1")
+    suspend fun getLatestReleaseOnce(): ReleaseRecordEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertRelease(release: ReleaseRecordEntity): Long
+}
+

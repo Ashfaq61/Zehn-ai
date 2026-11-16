@@ -68,6 +68,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.zehn.assistant.BuildConfig
 import com.zehn.assistant.R
 import com.zehn.assistant.ai.ProviderCatalog
 import com.zehn.assistant.ui.ZehnViewModel
@@ -98,6 +99,7 @@ fun HubScreen(onNavigate: (String) -> Unit) {
             HubDestinationItem("mission", "Mission Mode", "AgentLoop, Workflows & Flows", Icons.Filled.RocketLaunch),
             HubDestinationItem("call_assistant", "Call Assistant", "VIP filter, auto-answer & VoIP", Icons.Filled.TouchApp),
             HubDestinationItem("open_source_discovery", "OS Discovery", "Safe GitHub & Hugging Face inspect", Icons.Filled.Extension),
+            HubDestinationItem("upgrade_center", "Upgrade Center", "Autonomous Research, Auto-Dev & APK", Icons.Filled.SystemUpdate),
             HubDestinationItem("diagnostics", "Diagnostics", "Truthful Active / Blocked audit", Icons.Filled.VerifiedUser),
             HubDestinationItem("permissions", "Permissions", "System & default assistant audit", Icons.Filled.VerifiedUser),
             HubDestinationItem("api_keys", "API Keys", "Keystore AES-GCM vault", Icons.Filled.Key),
@@ -114,7 +116,7 @@ fun HubScreen(onNavigate: (String) -> Unit) {
             .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
         Text("Zehn Command Hub", style = MaterialTheme.typography.headlineMedium, color = ZehnColors.FrostWhite)
-        Text("All 17 modules, security controls & engines", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.SlateMuted)
+        Text("All ${destinations.size} modules, security controls & engines", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.SlateMuted)
         Spacer(Modifier.height(12.dp))
 
         LazyVerticalGrid(
@@ -454,6 +456,7 @@ private fun SettingToggle(
 @Composable
 fun UpdateScreen(vm: ZehnViewModel) {
     val onDevice by vm.onDeviceState.collectAsStateWithLifecycle()
+    val releases by vm.releaseHistory.collectAsStateWithLifecycle()
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 120.dp),
@@ -464,14 +467,26 @@ fun UpdateScreen(vm: ZehnViewModel) {
         }
         item {
             ClayGlassCard(accentGlow = true) {
-                Text("Zehn AI v1.0.0 (com.zehn.assistant)", style = MaterialTheme.typography.titleLarge, color = ZehnColors.Cyan)
+                Text("Zehn AI v${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE} • com.zehn.assistant)", style = MaterialTheme.typography.titleLarge, color = ZehnColors.Cyan)
                 Spacer(Modifier.height(6.dp))
                 Text("Target SDK 35 • Min SDK 24 • ABIs: ${Build.SUPPORTED_ABIS.joinToString(", ")}", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.FrostWhite)
                 Spacer(Modifier.height(6.dp))
                 val runtimeStatus = if (vm.liteRtManager.isNativeRuntimeAvailable()) "Native AAR Loaded" else "Interface Ready (Cloud/Fallback)"
                 Text("LiteRT-LM Runtime: $runtimeStatus • Downloaded offline models: ${onDevice.downloadedModels.size}", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.SlateMuted)
                 Spacer(Modifier.height(10.dp))
-                ClayActionButton(text = "Refresh Hardware & Model Cache", onClick = { vm.refreshTelemetry() })
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ClayActionButton(text = "Refresh Hardware", modifier = Modifier.weight(1f), onClick = { vm.refreshTelemetry() })
+                    ClayActionButton(text = "Check GitHub Releases", modifier = Modifier.weight(1f), onClick = { vm.checkForApkUpdates() })
+                }
+            }
+        }
+        items(releases.size) { idx ->
+            val rel = releases[idx]
+            ClayGlassCard {
+                Text("${rel.tagName} • ${rel.releaseName}", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan)
+                Text(rel.compatibilityNote, style = MaterialTheme.typography.labelSmall, color = ZehnColors.Emerald)
+                Spacer(Modifier.height(6.dp))
+                ClayActionButton(text = "Download Verified APK", onClick = { vm.openReleaseDownload(rel) })
             }
         }
     }

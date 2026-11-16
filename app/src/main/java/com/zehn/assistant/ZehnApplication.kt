@@ -93,7 +93,14 @@ class ZehnApplication : Application() {
             ).apply {
                 description = "Notifications from scheduled and event-driven triggers"
             }
-            manager.createNotificationChannels(listOf(wakeChannel, overlayChannel, triggerChannel))
+            val updatesChannel = NotificationChannel(
+                CHANNEL_UPDATES,
+                "APK Releases & Auto-Dev Updates",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Alerts when a verified GitHub Release APK is ready or when Auto-Dev reports status"
+            }
+            manager.createNotificationChannels(listOf(wakeChannel, overlayChannel, triggerChannel, updatesChannel))
         }
     }
 
@@ -102,5 +109,6 @@ class ZehnApplication : Application() {
         const val CHANNEL_WAKE_WORD = "zehn_wake_word"
         const val CHANNEL_OVERLAY = "zehn_overlay"
         const val CHANNEL_TRIGGERS = "zehn_triggers"
+        const val CHANNEL_UPDATES = "zehn_updates"
     }
 }

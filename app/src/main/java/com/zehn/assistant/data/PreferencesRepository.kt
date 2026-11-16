@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.zehn.assistant.data.model.AiExecutionMode
@@ -73,7 +74,22 @@ data class ZehnSettings(
     val geminiLiveVoiceEnabled: Boolean = true,
     val geminiLiveModel: String = "gemini-3.1-flash-live-preview",
     val geminiLiveFallbackModel: String = "gemini-2.5-flash-native-audio-preview-12-2025",
-    val geminiLiveCustomModel: String = ""
+    val geminiLiveCustomModel: String = "",
+    // V4.0 Autonomous GitHub Research, Self-Upgrade & APK Build Engine settings
+    val githubRepoSlug: String = "",
+    val githubBaseBranch: String = "main",
+    val autoDevEnabled: Boolean = false,
+    val autoMergeOnGreen: Boolean = false,
+    val allowWorkflowEdits: Boolean = false,
+    val researchScheduleMode: String = "MANUAL", // MANUAL, DAILY, WEEKLY
+    val researchFocusMode: String = "ALL_AI_TOOLS", // ALL_AI_TOOLS, SECURITY_ONLY
+    val researchPaused: Boolean = false,
+    val notifyOnUpdateReady: Boolean = true,
+    val notifyOnBuildFailure: Boolean = false,
+    val lastResearchTimestamp: Long = 0L,
+    val nextScheduledResearchTimestamp: Long = 0L,
+    val lastGoodCommitSha: String = "",
+    val lastGoodTagOrVersion: String = "4.0.0"
 )
 
 @Singleton
@@ -121,6 +137,20 @@ class PreferencesRepository @Inject constructor(
         val GEMINI_LIVE_MODEL = stringPreferencesKey("gemini_live_model")
         val GEMINI_LIVE_FALLBACK = stringPreferencesKey("gemini_live_fallback_model")
         val GEMINI_LIVE_CUSTOM = stringPreferencesKey("gemini_live_custom_model")
+        val GH_REPO = stringPreferencesKey("github_repo_slug")
+        val GH_BASE_BRANCH = stringPreferencesKey("github_base_branch")
+        val AUTO_DEV_ENABLED = booleanPreferencesKey("auto_dev_enabled")
+        val AUTO_MERGE_GREEN = booleanPreferencesKey("auto_merge_on_green")
+        val ALLOW_WORKFLOW_EDITS = booleanPreferencesKey("allow_workflow_edits")
+        val RESEARCH_SCHEDULE = stringPreferencesKey("research_schedule_mode")
+        val RESEARCH_FOCUS = stringPreferencesKey("research_focus_mode")
+        val RESEARCH_PAUSED = booleanPreferencesKey("research_paused")
+        val NOTIFY_UPDATE_READY = booleanPreferencesKey("notify_update_ready")
+        val NOTIFY_BUILD_FAILURE = booleanPreferencesKey("notify_build_failure")
+        val LAST_RESEARCH_TS = longPreferencesKey("last_research_ts")
+        val NEXT_RESEARCH_TS = longPreferencesKey("next_research_ts")
+        val LAST_GOOD_SHA = stringPreferencesKey("last_good_commit_sha")
+        val LAST_GOOD_VER = stringPreferencesKey("last_good_tag_or_version")
     }
 
     val settings: Flow<ZehnSettings> = context.zehnDataStore.data.map { p ->
@@ -168,7 +198,21 @@ class PreferencesRepository @Inject constructor(
             geminiLiveVoiceEnabled = p[Keys.GEMINI_LIVE_ENABLED] ?: true,
             geminiLiveModel = p[Keys.GEMINI_LIVE_MODEL] ?: defaults.geminiLiveModel,
             geminiLiveFallbackModel = p[Keys.GEMINI_LIVE_FALLBACK] ?: defaults.geminiLiveFallbackModel,
-            geminiLiveCustomModel = p[Keys.GEMINI_LIVE_CUSTOM] ?: ""
+            geminiLiveCustomModel = p[Keys.GEMINI_LIVE_CUSTOM] ?: "",
+            githubRepoSlug = p[Keys.GH_REPO] ?: "",
+            githubBaseBranch = p[Keys.GH_BASE_BRANCH]?.ifBlank { "main" } ?: "main",
+            autoDevEnabled = p[Keys.AUTO_DEV_ENABLED] ?: false,
+            autoMergeOnGreen = p[Keys.AUTO_MERGE_GREEN] ?: false,
+            allowWorkflowEdits = p[Keys.ALLOW_WORKFLOW_EDITS] ?: false,
+            researchScheduleMode = p[Keys.RESEARCH_SCHEDULE] ?: defaults.researchScheduleMode,
+            researchFocusMode = p[Keys.RESEARCH_FOCUS] ?: defaults.researchFocusMode,
+            researchPaused = p[Keys.RESEARCH_PAUSED] ?: false,
+            notifyOnUpdateReady = p[Keys.NOTIFY_UPDATE_READY] ?: true,
+            notifyOnBuildFailure = p[Keys.NOTIFY_BUILD_FAILURE] ?: false,
+            lastResearchTimestamp = p[Keys.LAST_RESEARCH_TS] ?: 0L,
+            nextScheduledResearchTimestamp = p[Keys.NEXT_RESEARCH_TS] ?: 0L,
+            lastGoodCommitSha = p[Keys.LAST_GOOD_SHA] ?: "",
+            lastGoodTagOrVersion = p[Keys.LAST_GOOD_VER] ?: defaults.lastGoodTagOrVersion
         )
     }
 
@@ -218,7 +262,21 @@ class PreferencesRepository @Inject constructor(
                 geminiLiveVoiceEnabled = p[Keys.GEMINI_LIVE_ENABLED] ?: true,
                 geminiLiveModel = p[Keys.GEMINI_LIVE_MODEL] ?: defaults.geminiLiveModel,
                 geminiLiveFallbackModel = p[Keys.GEMINI_LIVE_FALLBACK] ?: defaults.geminiLiveFallbackModel,
-                geminiLiveCustomModel = p[Keys.GEMINI_LIVE_CUSTOM] ?: ""
+                geminiLiveCustomModel = p[Keys.GEMINI_LIVE_CUSTOM] ?: "",
+                githubRepoSlug = p[Keys.GH_REPO] ?: "",
+                githubBaseBranch = p[Keys.GH_BASE_BRANCH]?.ifBlank { "main" } ?: "main",
+                autoDevEnabled = p[Keys.AUTO_DEV_ENABLED] ?: false,
+                autoMergeOnGreen = p[Keys.AUTO_MERGE_GREEN] ?: false,
+                allowWorkflowEdits = p[Keys.ALLOW_WORKFLOW_EDITS] ?: false,
+                researchScheduleMode = p[Keys.RESEARCH_SCHEDULE] ?: defaults.researchScheduleMode,
+                researchFocusMode = p[Keys.RESEARCH_FOCUS] ?: defaults.researchFocusMode,
+                researchPaused = p[Keys.RESEARCH_PAUSED] ?: false,
+                notifyOnUpdateReady = p[Keys.NOTIFY_UPDATE_READY] ?: true,
+                notifyOnBuildFailure = p[Keys.NOTIFY_BUILD_FAILURE] ?: false,
+                lastResearchTimestamp = p[Keys.LAST_RESEARCH_TS] ?: 0L,
+                nextScheduledResearchTimestamp = p[Keys.NEXT_RESEARCH_TS] ?: 0L,
+                lastGoodCommitSha = p[Keys.LAST_GOOD_SHA] ?: "",
+                lastGoodTagOrVersion = p[Keys.LAST_GOOD_VER] ?: defaults.lastGoodTagOrVersion
             )
             val next = transform(current)
             p[Keys.ONBOARDING] = next.onboardingCompleted
@@ -261,6 +319,20 @@ class PreferencesRepository @Inject constructor(
             p[Keys.GEMINI_LIVE_MODEL] = next.geminiLiveModel
             p[Keys.GEMINI_LIVE_FALLBACK] = next.geminiLiveFallbackModel
             p[Keys.GEMINI_LIVE_CUSTOM] = next.geminiLiveCustomModel
+            p[Keys.GH_REPO] = next.githubRepoSlug.trim()
+            p[Keys.GH_BASE_BRANCH] = next.githubBaseBranch.trim().ifBlank { "main" }
+            p[Keys.AUTO_DEV_ENABLED] = next.autoDevEnabled
+            p[Keys.AUTO_MERGE_GREEN] = next.autoMergeOnGreen
+            p[Keys.ALLOW_WORKFLOW_EDITS] = next.allowWorkflowEdits
+            p[Keys.RESEARCH_SCHEDULE] = next.researchScheduleMode
+            p[Keys.RESEARCH_FOCUS] = next.researchFocusMode
+            p[Keys.RESEARCH_PAUSED] = next.researchPaused
+            p[Keys.NOTIFY_UPDATE_READY] = next.notifyOnUpdateReady
+            p[Keys.NOTIFY_BUILD_FAILURE] = next.notifyOnBuildFailure
+            p[Keys.LAST_RESEARCH_TS] = next.lastResearchTimestamp
+            p[Keys.NEXT_RESEARCH_TS] = next.nextScheduledResearchTimestamp
+            p[Keys.LAST_GOOD_SHA] = next.lastGoodCommitSha
+            p[Keys.LAST_GOOD_VER] = next.lastGoodTagOrVersion
         }
     }
 

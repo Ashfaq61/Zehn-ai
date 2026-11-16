@@ -88,6 +88,7 @@ import com.zehn.assistant.ui.components.LocalZehnHapticsEnabled
 import com.zehn.assistant.ui.components.NotchedBottomNavBar
 import com.zehn.assistant.ui.screens.AccountScreen
 import com.zehn.assistant.ui.screens.ApiKeysScreen
+import com.zehn.assistant.ui.screens.AutonomousUpgradeCenterScreen
 import com.zehn.assistant.ui.screens.CallAssistantScreen
 import com.zehn.assistant.ui.screens.ChatScreen
 import com.zehn.assistant.ui.screens.ConversationsScreen
@@ -311,6 +312,7 @@ fun ZehnRootApp(
                             "settings" -> SettingsScreen(vm = vm)
                             "call_assistant" -> CallAssistantScreen(vm = vm)
                             "open_source_discovery" -> OpenSourceDiscoveryScreen(vm = vm)
+                            "upgrade_center" -> AutonomousUpgradeCenterScreen(vm = vm)
                             "diagnostics" -> DiagnosticsScreen(vm = vm)
                             "update" -> UpdateScreen(vm = vm)
                             "account" -> AccountScreen(vm = vm)
@@ -448,6 +450,7 @@ private fun routeTitle(route: String): String = when (route) {
     "settings" -> "Settings"
     "call_assistant" -> "Call Assistant"
     "open_source_discovery" -> "Open-Source Discovery"
+    "upgrade_center" -> "Autonomous Upgrade Center"
     "diagnostics" -> "System Diagnostics"
     "update" -> "Update"
     "account" -> "Account"

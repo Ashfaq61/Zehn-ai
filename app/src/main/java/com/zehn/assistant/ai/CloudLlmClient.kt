@@ -855,6 +855,7 @@ class CloudLlmClient @Inject constructor(
                 .replace(Regex("""sk-[0-9A-Za-z\-_]{6,}"""), "[REDACTED_KEY]")
                 .replace(Regex("""gsk_[0-9A-Za-z\-_]{6,}"""), "[REDACTED_GROQ]")
                 .replace(Regex("""hf_[0-9A-Za-z\-_]{6,}"""), "[REDACTED_HF]")
+                .replace(Regex("""(ghp|gho|ghu|ghs|github_pat)_[0-9A-Za-z_]{8,}"""), "[REDACTED_GH_TOKEN]")
                 .replace(Regex("""Bearer\s+[0-9A-Za-z\-._~+/]+=*""", RegexOption.IGNORE_CASE), "Bearer [REDACTED]")
         }
     }

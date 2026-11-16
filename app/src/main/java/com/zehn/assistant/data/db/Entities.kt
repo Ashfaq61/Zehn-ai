@@ -143,3 +143,93 @@ data class ActionLogEntity(
     constructor(category: String, title: String, detail: String, status: String) :
         this(0L, category, title, detail, status, System.currentTimeMillis())
 }
+
+@Serializable
+@Entity(
+    tableName = "discovered_tools",
+    indices = [Index(value = ["identifier"], unique = true)]
+)
+data class DiscoveredToolEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val source: String, // GITHUB or HUGGINGFACE
+    val identifier: String, // owner/repo or modelId
+    val name: String,
+    val description: String,
+    val starsOrDownloads: Int = 0,
+    val lastUpdated: String = "",
+    val license: String = "Unknown",
+    val languageOrPipeline: String = "",
+    val dependenciesSummary: String = "",
+    val supportedAndroidMinSdk: Int? = null,
+    val estimatedRamMb: Long = 0L,
+    val estimatedStorageMb: Long = 0L,
+    val batteryImpact: String = "Low",
+    val compatibilityScore: Int = 0,
+    val compatibilityReport: String = "",
+    val securityFlags: String = "CLEAR",
+    val isDuplicate: Boolean = false,
+    val duplicateReason: String = "",
+    val htmlUrl: String = "",
+    val evaluatedAt: Long = System.currentTimeMillis()
+)
+
+@Serializable
+@Entity(tableName = "upgrade_proposals")
+data class UpgradeProposalEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val toolIdentifier: String,
+    val title: String,
+    val summary: String,
+    val integrationPlan: String,
+    val proposedFilesJson: String = "[]",
+    val permissionsRequested: String = "",
+    val riskLevel: String = "SENSITIVE", // LOW, SENSITIVE, BLOCKED
+    val requiresApproval: Boolean = true,
+    val status: String = "PENDING", // PENDING, APPROVED, REJECTED, STAGED, MERGED, ROLLED_BACK, FAILED
+    val branchName: String = "",
+    val prNumber: Int? = null,
+    val prUrl: String = "",
+    val commitSha: String = "",
+    val lastBuildConclusion: String = "",
+    val lastErrorReport: String = "",
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+@Serializable
+@Entity(tableName = "dev_run_history")
+data class AutoDevRunEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val actionType: String, // RESEARCH, BRANCH, COMMIT, PR, BUILD_POLL, MERGE, ROLLBACK, RELEASE_CHECK
+    val branchOrRef: String = "",
+    val httpStatus: Int = 0,
+    val summary: String,
+    val detail: String = "",
+    val success: Boolean = true,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+@Serializable
+@Entity(
+    tableName = "release_history",
+    indices = [Index(value = ["tagName"], unique = true)]
+)
+data class ReleaseRecordEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val tagName: String,
+    val versionName: String,
+    val parsedVersionCode: Int? = null,
+    val releaseName: String = "",
+    val changelog: String = "",
+    val apkAssetName: String = "",
+    val apkDownloadUrl: String = "",
+    val releaseHtmlUrl: String = "",
+    val apkSizeBytes: Long = 0L,
+    val sha256: String = "",
+    val compatibleWithDevice: Boolean = true,
+    val compatibilityNote: String = "",
+    val publishedAt: String = "",
+    val notified: Boolean = false,
+    val detectedAt: Long = System.currentTimeMillis()
+)
+

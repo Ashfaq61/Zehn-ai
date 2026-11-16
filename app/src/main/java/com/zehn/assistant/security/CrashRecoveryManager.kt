@@ -71,7 +71,8 @@ class CrashRecoveryManager @Inject constructor(
         return raw
             .replace(Regex("""AIza[0-9A-Za-z\-_]{15,}"""), "[REDACTED_KEY]")
             .replace(Regex("""sk-[0-9A-Za-z\-_]{10,}"""), "[REDACTED_KEY]")
-            .replace(Regex("""ghp_[0-9A-Za-z]{10,}"""), "[REDACTED_TOKEN]")
+            .replace(Regex("""(ghp|gho|ghu|ghs|github_pat)_[0-9A-Za-z_]{8,}"""), "[REDACTED_TOKEN]")
+            .replace(Regex("""(gsk|hf)_[0-9A-Za-z_\-]{6,}"""), "[REDACTED_KEY]")
             .replace(Regex("""Bearer\s+[0-9A-Za-z\-._~+/]+=*""", RegexOption.IGNORE_CASE), "Bearer [REDACTED]")
             .take(220)
     }
