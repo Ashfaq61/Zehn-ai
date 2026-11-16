@@ -100,7 +100,17 @@ class ZehnApplication : Application() {
             ).apply {
                 description = "Alerts when a verified GitHub Release APK is ready or when Auto-Dev reports status"
             }
-            manager.createNotificationChannels(listOf(wakeChannel, overlayChannel, triggerChannel, updatesChannel))
+            val screenCaptureChannel = NotificationChannel(
+                CHANNEL_SCREEN_CAPTURE,
+                getString(R.string.screen_capture_notification_channel),
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Active while Zehn captures screen frames via MediaProjection with your consent"
+                setShowBadge(false)
+            }
+            manager.createNotificationChannels(
+                listOf(wakeChannel, overlayChannel, triggerChannel, updatesChannel, screenCaptureChannel)
+            )
         }
     }
 
@@ -110,5 +120,6 @@ class ZehnApplication : Application() {
         const val CHANNEL_OVERLAY = "zehn_overlay"
         const val CHANNEL_TRIGGERS = "zehn_triggers"
         const val CHANNEL_UPDATES = "zehn_updates"
+        const val CHANNEL_SCREEN_CAPTURE = "zehn_screen_capture"
     }
 }

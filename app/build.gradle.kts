@@ -16,8 +16,8 @@ android {
     applicationId = "com.zehn.assistant"
     minSdk = 24
     targetSdk = 35
-    versionCode = (project.findProperty("ZEHN_VERSION_CODE") as? String)?.toIntOrNull() ?: 4
-    versionName = (project.findProperty("ZEHN_VERSION_NAME") as? String)?.takeIf { it.isNotBlank() } ?: "4.0.0"
+    versionCode = (project.findProperty("ZEHN_VERSION_CODE") as? String)?.toIntOrNull() ?: 5
+    versionName = (project.findProperty("ZEHN_VERSION_NAME") as? String)?.takeIf { it.isNotBlank() } ?: "4.1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.zehn.assistant.agent.ZehnAccessibilityService
 import com.zehn.assistant.data.model.VoiceLanguage
 import com.zehn.assistant.ui.ZehnViewModel
 import com.zehn.assistant.ui.components.ClayActionButton
@@ -283,20 +284,30 @@ fun OpenSourceDiscoveryScreen(vm: ZehnViewModel) {
 }
 
 @Composable
-fun DiagnosticsScreen(vm: ZehnViewModel) {
+fun DiagnosticsScreen(
+    vm: ZehnViewModel,
+    onOpenAccessibilityDebug: () -> Unit = {}
+) {
     val context = LocalContext.current
     val settings by vm.settings.collectAsStateWithLifecycle()
     val accSvc by vm.accessibilityConnected.collectAsStateWithLifecycle()
     val notifConnected by vm.notificationListenerConnected.collectAsStateWithLifecycle()
     val onDevice by vm.onDeviceState.collectAsStateWithLifecycle()
     val liveDiscovery by vm.liveModelsDiscovery.collectAsStateWithLifecycle()
+    val a11yPermEnabled = remember(accSvc) { ZehnAccessibilityService.isAccessibilityPermissionEnabled(context) }
 
     fun has(p: String): Boolean = ContextCompat.checkSelfPermission(context, p) == PackageManager.PERMISSION_GRANTED
+
+    val accLabel = when {
+        accSvc != null -> "CONNECTED & ACTIVE"
+        a11yPermEnabled -> "PERMISSION ENABLED, SERVICE DISCONNECTED (Reconnect)"
+        else -> "DISABLED (Enable in Accessibility Settings)"
+    }
 
     val rows = listOf(
         Triple("Microphone / Voice Control", if (has(Manifest.permission.RECORD_AUDIO)) "ACTIVE" else "PERMISSION REQUIRED", ZehnColors.Cyan),
         Triple("Gemini Live Audio API", if (vm.crypto.getGeminiKeys().isNotEmpty() && settings.geminiLiveVoiceEnabled) "CONFIGURED (${liveDiscovery.availableModels.size} models)" else "NEEDS GEMINI KEY", ZehnColors.Cyan),
-        Triple("Accessibility GUI Agent", if (accSvc != null) "ACTIVE" else "INACTIVE (Enable in Settings)", ZehnColors.Amber),
+        Triple("Accessibility GUI Agent", accLabel, if (accSvc != null) ZehnColors.Emerald else ZehnColors.Amber),
         Triple("Notification Listener", if (notifConnected) "ACTIVE" else "INACTIVE", ZehnColors.Amber),
         Triple("CameraX + ML Kit OCR/QR", if (has(Manifest.permission.CAMERA)) "READY" else "PERMISSION REQUIRED", ZehnColors.Cyan),
         Triple("LiteRT-LM On-Device Engine", if (vm.liteRtManager.isNativeRuntimeAvailable()) "NATIVE AAR READY" else "INTERFACE MODE (Cloud Fallback)", ZehnColors.SlateMuted),
@@ -331,6 +342,12 @@ fun DiagnosticsScreen(vm: ZehnViewModel) {
                     runCatching { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
                 })
             }
+            Spacer(Modifier.height(8.dp))
+            ClayActionButton(
+                text = "Open Accessibility Debug Dashboard",
+                modifier = Modifier.fillMaxWidth().testTag("diagnostics_open_a11y_debug_button"),
+                onClick = onOpenAccessibilityDebug
+            )
         }
     }
 }

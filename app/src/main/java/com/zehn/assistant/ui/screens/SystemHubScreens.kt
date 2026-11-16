@@ -70,6 +70,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zehn.assistant.BuildConfig
 import com.zehn.assistant.R
+import com.zehn.assistant.agent.ZehnAccessibilityService
 import com.zehn.assistant.ai.ProviderCatalog
 import com.zehn.assistant.ui.ZehnViewModel
 import com.zehn.assistant.ui.components.ClayActionButton
@@ -100,6 +101,7 @@ fun HubScreen(onNavigate: (String) -> Unit) {
             HubDestinationItem("call_assistant", "Call Assistant", "VIP filter, auto-answer & VoIP", Icons.Filled.TouchApp),
             HubDestinationItem("open_source_discovery", "OS Discovery", "Safe GitHub & Hugging Face inspect", Icons.Filled.Extension),
             HubDestinationItem("upgrade_center", "Upgrade Center", "Autonomous Research, Auto-Dev & APK", Icons.Filled.SystemUpdate),
+            HubDestinationItem("accessibility_debug", "Accessibility Debug", "Screen reading, click, scroll, swipe & OCR", Icons.Filled.TouchApp),
             HubDestinationItem("diagnostics", "Diagnostics", "Truthful Active / Blocked audit", Icons.Filled.VerifiedUser),
             HubDestinationItem("permissions", "Permissions", "System & default assistant audit", Icons.Filled.VerifiedUser),
             HubDestinationItem("api_keys", "API Keys", "Keystore AES-GCM vault", Icons.Filled.Key),
@@ -165,7 +167,7 @@ fun PermissionsScreen(vm: ZehnViewModel) {
         Triple("Send SMS (Confirmed Actions)", granted(Manifest.permission.SEND_SMS)) {
             runtimePermLauncher.launch(Manifest.permission.SEND_SMS)
         },
-        Triple("Accessibility Agent Service", accSvc != null) {
+        Triple("Accessibility Agent Service", accSvc != null || ZehnAccessibilityService.isAccessibilityPermissionEnabled(context)) {
             context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         },
         Triple("Notification Intelligence Listener", notifConnected) {

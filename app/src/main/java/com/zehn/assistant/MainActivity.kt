@@ -86,6 +86,7 @@ import com.zehn.assistant.ui.components.ClayActionButton
 import com.zehn.assistant.ui.components.ClayGlassCard
 import com.zehn.assistant.ui.components.LocalZehnHapticsEnabled
 import com.zehn.assistant.ui.components.NotchedBottomNavBar
+import com.zehn.assistant.ui.screens.AccessibilityDebugScreen
 import com.zehn.assistant.ui.screens.AccountScreen
 import com.zehn.assistant.ui.screens.ApiKeysScreen
 import com.zehn.assistant.ui.screens.AutonomousUpgradeCenterScreen
@@ -301,7 +302,10 @@ fun ZehnRootApp(
                             "skills" -> SkillsScreen(vm = vm)
                             "memory" -> MemoryScreen(vm = vm)
                             "security" -> SecurityScreen(vm = vm)
-                            "touch_guard" -> TouchGuardScreen(vm = vm)
+                            "touch_guard" -> TouchGuardScreen(
+                                vm = vm,
+                                onOpenAccessibilityDebug = { activeSubRoute = "accessibility_debug" }
+                            )
                             "mission" -> MissionModeScreen(vm = vm)
                             "permissions" -> PermissionsScreen(vm = vm)
                             "api_keys" -> ApiKeysScreen(vm = vm)
@@ -313,7 +317,11 @@ fun ZehnRootApp(
                             "call_assistant" -> CallAssistantScreen(vm = vm)
                             "open_source_discovery" -> OpenSourceDiscoveryScreen(vm = vm)
                             "upgrade_center" -> AutonomousUpgradeCenterScreen(vm = vm)
-                            "diagnostics" -> DiagnosticsScreen(vm = vm)
+                            "diagnostics" -> DiagnosticsScreen(
+                                vm = vm,
+                                onOpenAccessibilityDebug = { activeSubRoute = "accessibility_debug" }
+                            )
+                            "accessibility_debug" -> AccessibilityDebugScreen(vm = vm)
                             "update" -> UpdateScreen(vm = vm)
                             "account" -> AccountScreen(vm = vm)
                         }
@@ -452,6 +460,7 @@ private fun routeTitle(route: String): String = when (route) {
     "open_source_discovery" -> "Open-Source Discovery"
     "upgrade_center" -> "Autonomous Upgrade Center"
     "diagnostics" -> "System Diagnostics"
+    "accessibility_debug" -> "Accessibility Debug"
     "update" -> "Update"
     "account" -> "Account"
     else -> "Zehn AI"

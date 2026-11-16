@@ -65,7 +65,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "version_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           else
-            echo "version_name=4.0.$RUN_CODE" >> "$GITHUB_OUTPUT"
+            echo "version_name=4.1.$RUN_CODE" >> "$GITHUB_OUTPUT"
           fi
           echo "version_code=$RUN_CODE" >> "$GITHUB_OUTPUT"
 

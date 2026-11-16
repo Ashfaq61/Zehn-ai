@@ -15,6 +15,9 @@ import android.util.Base64
 import androidx.core.content.ContextCompat
 import com.zehn.assistant.agent.AgentLoop
 import com.zehn.assistant.agent.PhoneControlExecutor
+import com.zehn.assistant.agent.ScreenVisionManager
+import com.zehn.assistant.agent.ScrollDirection
+import com.zehn.assistant.agent.ZehnAccessibilityService
 import com.zehn.assistant.agent.ZehnNotificationListenerService
 import com.zehn.assistant.ai.ModelOption
 import com.zehn.assistant.ai.ProviderCatalog
@@ -86,8 +89,20 @@ class GeminiLiveAudioClient @Inject constructor(
     private val safetyPolicy: SafetyPolicyManager,
     private val agentLoop: AgentLoop,
     private val phoneControl: PhoneControlExecutor,
-    private val actionLogDao: ActionLogDao
+    private val actionLogDao: ActionLogDao,
+    private val screenVisionManager: ScreenVisionManager? = null
 ) {
+    // Secondary constructor preserved for unit tests
+    constructor(
+        context: Context,
+        okHttpClient: OkHttpClient,
+        crypto: KeystoreCryptoManager,
+        safetyPolicy: SafetyPolicyManager,
+        agentLoop: AgentLoop,
+        phoneControl: PhoneControlExecutor,
+        actionLogDao: ActionLogDao
+    ) : this(context, okHttpClient, crypto, safetyPolicy, agentLoop, phoneControl, actionLogDao, null)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _discoveryState = MutableStateFlow(LiveModelsDiscoveryState())
@@ -793,6 +808,60 @@ class GeminiLiveAudioClient @Inject constructor(
                     else items.joinToString("\n") { "• [${it.title}] ${it.body}" }
                 }
                 "get_clipboard" -> phoneControl.getClipboardText().ifBlank { "Clipboard is empty." }
+                "observe_screen" -> {
+                    val svc = ZehnAccessibilityService.instance.value
+                        ?: return "Accessibility Service is disconnected. Enable Zehn AI Accessibility in Android Settings."
+                    val obs = svc.observeScreenStructured()
+                    if (!obs.error.isNullOrBlank()) {
+                        obs.error
+                    } else {
+                        buildString {
+                            append("App: ${obs.packageName} | Nodes: ${obs.totalNodeCount} | Clickable: ${obs.clickableElements.size} | Scrollable: ${obs.scrollableContainers.size}\n")
+                            append("Visible text: ${obs.screenText.take(20).joinToString(" | ")}")
+                        }
+                    }
+                }
+                "click_screen_element" -> {
+                    val target = args.optString("target")
+                    val svc = ZehnAccessibilityService.instance.value
+                        ?: return "Accessibility Service is disconnected. Enable Zehn AI Accessibility first."
+                    when (val res = svc.tapNodeByTextVerified(target)) {
+                        is ZehnAccessibilityService.TapOutcome.Success -> res.message
+                        is ZehnAccessibilityService.TapOutcome.Blocked -> res.reason
+                        is ZehnAccessibilityService.TapOutcome.Failed -> res.reason
+                    }
+                }
+                "scroll_screen" -> {
+                    val dirRaw = args.optString("direction", "down").lowercase()
+                    val svc = ZehnAccessibilityService.instance.value
+                        ?: return "Accessibility Service is disconnected. Enable Zehn AI Accessibility first."
+                    val dir = if (dirRaw.contains("up")) ScrollDirection.UP else ScrollDirection.DOWN
+                    svc.scrollDirection(dir, args.optString("container_hint").ifBlank { null }).message
+                }
+                "swipe_screen" -> {
+                    val dir = args.optString("direction", "left").lowercase()
+                    val svc = ZehnAccessibilityService.instance.value
+                        ?: return "Accessibility Service is disconnected. Enable Zehn AI Accessibility first."
+                    svc.performVerifiedSwipe(dir).message
+                }
+                "long_press_screen" -> {
+                    val target = args.optString("target").ifBlank { null }
+                    val svc = ZehnAccessibilityService.instance.value
+                        ?: return "Accessibility Service is disconnected. Enable Zehn AI Accessibility first."
+                    svc.longPressNodeOrPoint(query = target).message
+                }
+                "navigate_back" -> {
+                    val svc = ZehnAccessibilityService.instance.value
+                        ?: return "Accessibility Service is disconnected."
+                    if (svc.performBack()) "Navigated Back" else "Back action failed"
+                }
+                "capture_screen_ocr" -> {
+                    val mgr = screenVisionManager
+                        ?: return "Screen Vision Manager unavailable."
+                    val res = mgr.captureAndAnalyzeScreen(useVisionModel = false)
+                    if (res.error != null) res.error
+                    else "Method: ${res.method}\nOCR Text:\n${res.ocrText.take(1200)}"
+                }
                 "run_agent_goal" -> {
                     val goal = args.optString("goal")
                     agentLoop.tryExecuteCommand(goal) ?: agentLoop.runGuiLoop(goal)
@@ -1173,7 +1242,14 @@ class GeminiLiveAudioClient @Inject constructor(
             .put(tool("set_timer", "Start a countdown timer.", mapOf("seconds" to ("INTEGER" to "Duration in seconds"), "label" to ("STRING" to "Timer label")), listOf("seconds")))
             .put(tool("read_notifications", "Read recent captured notifications on the phone."))
             .put(tool("get_clipboard", "Read current text from the Android clipboard."))
-            .put(tool("run_agent_goal", "Run an accessibility GUI automation goal on screen.", mapOf("goal" to ("STRING" to "Action goal such as scroll down or tap Continue")), listOf("goal")))
+            .put(tool("observe_screen", "Read the structured UI tree, visible text, clickable buttons, and scrollable containers of the current screen."))
+            .put(tool("click_screen_element", "Tap a visible UI button or item by its text or description.", mapOf("target" to ("STRING" to "Exact or partial label of the button or element to tap")), listOf("target")))
+            .put(tool("scroll_screen", "Scroll the current screen or list up or down.", mapOf("direction" to ("STRING" to "up or down"), "container_hint" to ("STRING" to "Optional scrollable list name or hint")), listOf("direction")))
+            .put(tool("swipe_screen", "Perform a directional touch swipe gesture across the screen.", mapOf("direction" to ("STRING" to "left, right, up, or down")), listOf("direction")))
+            .put(tool("long_press_screen", "Long press a screen element by text label, or center of screen if omitted.", mapOf("target" to ("STRING" to "Optional label to long-press"))))
+            .put(tool("navigate_back", "Press the Android system Back action via Accessibility."))
+            .put(tool("capture_screen_ocr", "Capture visible screen pixels and extract text with on-device ML Kit OCR."))
+            .put(tool("run_agent_goal", "Run a multi-step or compound Android accessibility GUI automation goal.", mapOf("goal" to ("STRING" to "Full natural-language goal such as 'Open WhatsApp and scroll down'")), listOf("goal")))
     }
 
     internal fun sanitizeError(raw: String): String {

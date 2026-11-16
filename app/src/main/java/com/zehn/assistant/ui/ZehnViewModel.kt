@@ -1,11 +1,14 @@
 package com.zehn.assistant.ui
 
+import android.app.Activity
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.zehn.assistant.ZehnApplication
+import com.zehn.assistant.agent.AccessibilityDiagnostics
 import com.zehn.assistant.agent.AgentLoop
 import com.zehn.assistant.agent.AgentPlanState
 import com.zehn.assistant.agent.CallAssistantManager
@@ -15,6 +18,11 @@ import com.zehn.assistant.agent.CameraLaunchRequest
 import com.zehn.assistant.agent.FloatingBubbleService
 import com.zehn.assistant.agent.PhoneControlExecutor
 import com.zehn.assistant.agent.PlanManager
+import com.zehn.assistant.agent.ScreenCaptureService
+import com.zehn.assistant.agent.ScreenObservation
+import com.zehn.assistant.agent.ScreenVisionManager
+import com.zehn.assistant.agent.ScrollDirection
+import com.zehn.assistant.agent.VisualScreenAnalysis
 import com.zehn.assistant.agent.ZehnAccessibilityService
 import com.zehn.assistant.agent.ZehnNotificationListenerService
 import com.zehn.assistant.ai.AiEngineRouter
@@ -83,7 +91,9 @@ import com.zehn.assistant.voice.VoicePipelineUiState
 import com.zehn.assistant.voice.WakeWordService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -92,6 +102,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -119,6 +130,7 @@ class ZehnViewModel @Inject constructor(
     val planManager: PlanManager,
     val phoneControl: PhoneControlExecutor,
     val callAssistant: CallAssistantManager,
+    private val screenVisionManager: ScreenVisionManager,
     private val backupManager: BackupManager,
     private val crashRecoveryManager: CrashRecoveryManager,
     private val upgradeCenterDao: UpgradeCenterDao,
@@ -144,8 +156,26 @@ class ZehnViewModel @Inject constructor(
     val cameraLaunchRequests: SharedFlow<CameraLaunchRequest> = voiceCoordinator.cameraLaunchRequests
 
     val accessibilityConnected = ZehnAccessibilityService.instance
+    val isAccessibilityServiceConnected: StateFlow<Boolean> = ZehnAccessibilityService.isConnected
+    val accessibilityDiagnostics: StateFlow<AccessibilityDiagnostics> = ZehnAccessibilityService.diagnostics
+    val mediaProjectionActive: StateFlow<Boolean> = ScreenCaptureService.projectionActive
     val notificationListenerConnected = ZehnNotificationListenerService.connected
     val lastCrashReport: StateFlow<CrashRecoveryReport?> = crashRecoveryManager.lastCrashReport
+
+    private val _lastScreenObservation = MutableStateFlow<ScreenObservation?>(null)
+    val lastScreenObservation: StateFlow<ScreenObservation?> = _lastScreenObservation.asStateFlow()
+
+    private val _lastVisualAnalysis = MutableStateFlow<VisualScreenAnalysis?>(null)
+    val lastVisualAnalysis: StateFlow<VisualScreenAnalysis?> = _lastVisualAnalysis.asStateFlow()
+
+    private val _playgroundClickCount = MutableStateFlow(0)
+    val playgroundClickCount: StateFlow<Int> = _playgroundClickCount.asStateFlow()
+
+    private val _playgroundActionLog = MutableStateFlow("Tap button, scroll list, or swipe horizontal cards to verify Accessibility automation.")
+    val playgroundActionLog: StateFlow<String> = _playgroundActionLog.asStateFlow()
+
+    private val _screenshotPermissionStatus = MutableStateFlow(ScreenCaptureService.getPermissionStatus(app).label)
+    val screenshotPermissionStatus: StateFlow<String> = _screenshotPermissionStatus.asStateFlow()
 
     private val _activeConversationId = MutableStateFlow(1L)
     val activeConversationId: StateFlow<Long> = _activeConversationId.asStateFlow()
@@ -983,5 +1013,178 @@ class ZehnViewModel @Inject constructor(
 
     fun clearDevRunHistory() = viewModelScope.launch {
         upgradeCenterDao.clearDevRuns()
+    }
+
+    // ---- V4.1 Accessibility Debug Dashboard & Screen Vision Actions ----
+
+    fun incrementPlaygroundClick() {
+        val next = _playgroundClickCount.value + 1
+        _playgroundClickCount.value = next
+        _playgroundActionLog.value = "Test Tap Target clicked! Count = $next"
+    }
+
+    fun recordPlaygroundEvent(msg: String) {
+        _playgroundActionLog.value = msg
+    }
+
+    fun refreshAccessibilityDiagnostics() {
+        ZehnAccessibilityService.refreshDiagnosticsSnapshot(app)
+        _screenshotPermissionStatus.value = ScreenCaptureService.getPermissionStatus(app).label
+    }
+
+    fun runTestScreenReading() = viewModelScope.launch(Dispatchers.Default) {
+        refreshAccessibilityDiagnostics()
+        val svc = ZehnAccessibilityService.instance.value
+        if (svc == null) {
+            val enabled = ZehnAccessibilityService.isAccessibilityPermissionEnabled(app)
+            val err = if (enabled) {
+                "Permission enabled in Settings, but ZehnAccessibilityService is not bound yet. Tap Reconnect Service."
+            } else {
+                "Accessibility permission DISABLED & service DISCONNECTED. Enable Zehn AI Accessibility first."
+            }
+            ZehnAccessibilityService.recordExternalAction("TEST_SCREEN_READING", err, err)
+            _toastBanner.value = err
+            return@launch
+        }
+        val obs = svc.observeScreenStructured()
+        _lastScreenObservation.value = obs
+        _screenshotPermissionStatus.value = ScreenCaptureService.getPermissionStatus(app).label
+        _toastBanner.value = if (!obs.error.isNullOrBlank()) {
+            obs.error
+        } else {
+            "Read ${obs.totalNodeCount} nodes (${obs.clickableElements.size} clickable, ${obs.scrollableContainers.size} scrollable)"
+        }
+    }
+
+    fun runTestClick(targetText: String = "Test Tap Target") = viewModelScope.launch(Dispatchers.Default) {
+        val svc = ZehnAccessibilityService.instance.value
+        if (svc == null) {
+            val msg = "Accessibility Service DISCONNECTED — cannot click '$targetText'."
+            ZehnAccessibilityService.recordExternalAction("TEST_CLICK", msg, msg)
+            _toastBanner.value = msg
+            return@launch
+        }
+        val outcome = svc.tapNodeByTextVerified(targetText)
+        val msg = when (outcome) {
+            is ZehnAccessibilityService.TapOutcome.Success -> outcome.message
+            is ZehnAccessibilityService.TapOutcome.Blocked -> outcome.reason
+            is ZehnAccessibilityService.TapOutcome.Failed -> outcome.reason
+        }
+        delay(180)
+        _lastScreenObservation.value = svc.observeScreenStructured()
+        _toastBanner.value = msg
+    }
+
+    fun runTestScrollDown() = viewModelScope.launch(Dispatchers.Default) {
+        val svc = ZehnAccessibilityService.instance.value
+        if (svc == null) {
+            val msg = "Accessibility Service DISCONNECTED — cannot scroll down."
+            ZehnAccessibilityService.recordExternalAction("TEST_SCROLL_DOWN", msg, msg)
+            _toastBanner.value = msg
+            return@launch
+        }
+        val res = svc.scrollDirection(ScrollDirection.DOWN)
+        delay(200)
+        _lastScreenObservation.value = svc.observeScreenStructured()
+        _toastBanner.value = res.message
+    }
+
+    fun runTestScrollUp() = viewModelScope.launch(Dispatchers.Default) {
+        val svc = ZehnAccessibilityService.instance.value
+        if (svc == null) {
+            val msg = "Accessibility Service DISCONNECTED — cannot scroll up."
+            ZehnAccessibilityService.recordExternalAction("TEST_SCROLL_UP", msg, msg)
+            _toastBanner.value = msg
+            return@launch
+        }
+        val res = svc.scrollDirection(ScrollDirection.UP)
+        delay(200)
+        _lastScreenObservation.value = svc.observeScreenStructured()
+        _toastBanner.value = res.message
+    }
+
+    fun runTestSwipeLeft() = viewModelScope.launch(Dispatchers.Default) {
+        val svc = ZehnAccessibilityService.instance.value
+        if (svc == null) {
+            val msg = "Accessibility Service DISCONNECTED — cannot swipe left."
+            ZehnAccessibilityService.recordExternalAction("TEST_SWIPE_LEFT", msg, msg)
+            _toastBanner.value = msg
+            return@launch
+        }
+        val res = svc.performVerifiedSwipe("left")
+        delay(200)
+        _lastScreenObservation.value = svc.observeScreenStructured()
+        _toastBanner.value = res.message
+    }
+
+    fun runTestSwipeRight() = viewModelScope.launch(Dispatchers.Default) {
+        val svc = ZehnAccessibilityService.instance.value
+        if (svc == null) {
+            val msg = "Accessibility Service DISCONNECTED — cannot swipe right."
+            ZehnAccessibilityService.recordExternalAction("TEST_SWIPE_RIGHT", msg, msg)
+            _toastBanner.value = msg
+            return@launch
+        }
+        val res = svc.performVerifiedSwipe("right")
+        delay(200)
+        _lastScreenObservation.value = svc.observeScreenStructured()
+        _toastBanner.value = res.message
+    }
+
+    /**
+     * Refreshes an active service's AccessibilityServiceInfo config or returns false if
+     * Android OS hasn't bound the service yet (caller should launch Accessibility Settings).
+     */
+    fun reconnectAccessibilityService(): Boolean {
+        val svc = ZehnAccessibilityService.instance.value
+        if (svc != null) {
+            val res = svc.refreshServiceConfiguration()
+            refreshAccessibilityDiagnostics()
+            _toastBanner.value = res.message
+            return true
+        }
+        val enabled = ZehnAccessibilityService.isAccessibilityPermissionEnabled(app)
+        val msg = if (enabled) {
+            "Permission enabled, but OS detached service — toggle Zehn AI OFF/ON in Accessibility Settings."
+        } else {
+            "Accessibility permission disabled — opening Android Accessibility Settings."
+        }
+        ZehnAccessibilityService.recordExternalAction("RECONNECT_SERVICE", msg, msg)
+        refreshAccessibilityDiagnostics()
+        _toastBanner.value = msg
+        return false
+    }
+
+    fun onMediaProjectionConsentResult(resultCode: Int, data: Intent?) {
+        if (resultCode == Activity.RESULT_OK && data != null) {
+            ScreenCaptureService.startWithConsent(app, resultCode, data)
+            viewModelScope.launch {
+                delay(250)
+                refreshAccessibilityDiagnostics()
+            }
+            _toastBanner.value = "MediaProjection screen capture activated"
+        } else {
+            _screenshotPermissionStatus.value = ScreenCaptureService.getPermissionStatus(app).label
+            _toastBanner.value = "MediaProjection permission was denied"
+        }
+    }
+
+    fun stopMediaProjection() {
+        ScreenCaptureService.stop(app)
+        refreshAccessibilityDiagnostics()
+        _toastBanner.value = "MediaProjection screen capture stopped"
+    }
+
+    fun runCaptureAndOcrScreen(visionPrompt: String? = null) = viewModelScope.launch(Dispatchers.IO) {
+        val analysis = screenVisionManager.captureAndAnalyzeScreen(
+            visionPrompt = visionPrompt,
+            useVisionModel = !visionPrompt.isNullOrBlank()
+        )
+        _lastVisualAnalysis.value = analysis
+        withContext(Dispatchers.Main) {
+            refreshAccessibilityDiagnostics()
+            _toastBanner.value = analysis.error
+                ?: "Captured screen (${analysis.method}): ${analysis.ocrElements.size} OCR lines"
+        }
     }
 }

@@ -1,28 +1,36 @@
 # CHANGELOG — Zehn AI (`com.zehn.assistant`)
 
-## V4.0 — Autonomous GitHub Research, Self-Upgrade & APK Build Engine
+## V4.1 — Screen Vision & Android Accessibility Automation Repair (`versionCode = 5`)
+
+### Fixed
+- **Accessibility Service Binding (`AndroidManifest.xml`, `accessibility_service_config.xml`, `ZehnAccessibilityService`)**:
+  - Changed `ZehnAccessibilityService` from `android:exported="false"` to `android:exported="true"` with `BIND_ACCESSIBILITY_SERVICE` permission so Android 7–16 binds the service reliably.
+  - Removed deprecated `flagRequestEnhancedWebAccessibility`, configured `flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews`, `canPerformGestures="true"`, `canRetrieveWindowContent="true"`, `canTakeScreenshot="true"`, and clean `onUnbind`/`onInterrupt`/`onDestroy`/`refreshServiceConfiguration()` lifecycle tracking.
+- **Silent False-Positive Clicks, Scrolls & Swipes**:
+  - Replaced direct leaf-node clicking and unverified fire-and-forget `dispatchGesture(..., null, null)` calls with clickable/long-clickable ancestor discovery (up to 7 parent hops), `AccessibilityNodeInfo.refresh()`, verified `GestureResultCallback` suspension (`suspendCancellableCoroutine` + timeouts), largest visible scrollable container prioritization, and `WindowManager.currentWindowMetrics` visible-bounds coordinate clamping.
+  - Added multi-window `windows` fallback when `rootInActiveWindow` returns null, plus strict password/PIN/OTP masking (`isPassword`, `isPasswordViewId`, `isPasswordInputType`).
+- **Compound & Bilingual GUI Voice Commands (`AgentEngine`)**:
+  - Fixed `IntentClassifier.classify()` so compound commands such as `"WhatsApp kholo aur chat list scroll karo"` and `"Open Settings and tap Wi-Fi"` route to `COMPOUND_GUI` (`STANDARD_PATH`) instead of misrouting to SMS/WhatsApp message sending.
+  - Fixed `extractClickTarget()` for English/Roman-Urdu targets (e.g., `"Screen par Settings button click karo"` -> `"Settings"`).
+  - Upgraded `AgentLoop.runGuiLoop()` to a non-blocking `Dispatchers.Default` 6-stage `OBSERVE -> UNDERSTAND -> PLAN -> EXECUTE -> VERIFY -> RECOVER` pipeline with genuine post-action screen state checks and OCR recovery fallback.
 
 ### Added
-- **Autonomous GitHub & Hugging Face Research Agent (`AutonomousResearchAgent`)**:
-  - Covers 14 GitHub capability domains (Android AI assistants, voice, AccessibilityService, screen/computer-use, AI call/Telecom/InCallService, MCP tools, agent frameworks, RAG/memory, vision/OCR, STT/TTS, offline LLMs, UI automation, security/performance) plus 6 Hugging Face model tracks (Urdu ASR, multilingual TTS, lightweight LLMs, vision/OCR, LiteRT/on-device).
-  - Decodes repository README & Gradle/package specs to extract actual `minSdk`, dependencies, licenses, RAM/storage/battery estimates, and multi-factor compatibility scores without judging only by star counts.
-  - Persists evaluated tools in Room `discovered_tools` (`ZehnDatabase` v2 with safe `MIGRATION_1_2`) so repositories are not repeatedly re-evaluated.
-- **Safety, License, Duplicate & Approval Analyzer (`RepoSafetyAnalyzer`)**:
-  - Audits SPDX licenses, scans diffs for leaked tokens (`ghp_`, `github_pat_`, `AIza`, `sk-`, `gsk_`, `hf_`), blocks external DCL/malware/oversized files/workflow edits (`allowWorkflowEdits` default OFF), detects duplicate built-in capabilities, and gates sensitive permissions/accessibility/call/security/manifest changes behind user approval.
-- **GitHub Auto-Dev Integration Engine (`GitHubAutoDevEngine`)**:
-  - Securely authenticates using encrypted Keystore PAT (`KEY_GITHUB_TOKEN`, never embedded or logged), monitors repo permissions, creates isolated `zehn-auto/...` branches (never committing directly to `main`), performs atomic Git Data API commits, opens PRs, polls GitHub Actions builds + downloads failed job log tails for bounded self-repair diagnostics (max 5 attempts), supports approval-gated merges, and rolls back branches to stable commit SHAs.
-- **Release & Update Notification Manager (`ReleaseUpdateManager`)**:
-  - Monitors published GitHub Releases, verifies device compatibility & trusted GitHub URLs, records release history for rollback, requests `POST_NOTIFICATIONS` on Android 13+, posts `CHANNEL_UPDATES` notifications with version/changelog/APK size, and launches the verified download URL so the user completes Android's standard installation confirmation.
-- **Autonomous Scheduler (`UpgradeScheduler`, `ResearchScheduleWorker`, `ReleaseCheckWorker`)**:
-  - Supports configurable `DAILY`, `WEEKLY`, and `MANUAL` schedules plus `SECURITY_ONLY` / `ALL_AI_TOOLS` focus filters, pause/resume controls, battery-not-low & connected-network constraints, and periodic release checks via WorkManager.
-- **Autonomous Upgrade Center (`AutonomousUpgradeCenterScreen`)**:
-  - Added full control dashboard in Hub (`upgrade_center`) displaying live connection status, research metrics, last/next scan dates, discovered/approved/integrated/passed-CI counts, latest APK version, GitHub configuration, all 10 control buttons, proposals review queue, release history, rollback button, and local API audit log.
-- **Upgraded CI/CD (`.github/workflows/android-build.yml`)**:
-  - Added `zehn-auto/**` branch CI triggers, `lintDebug`, `:app:dependencies` audit, `aapt2 dump badging` package validation (`com.zehn.assistant`), dynamic `ZEHN_VERSION_CODE` / `ZEHN_VERSION_NAME`, build/test/lint artifact archival, optional signed `assembleRelease`, and safe GitHub Release publishing (`overwrite_files: false`).
-- **Acceptance Test Suite (`ZehnV40AutonomousUpgradeTest`)**:
-  - Added 4 end-to-end Robolectric + stateful OkHttp interceptor acceptance tests; total automated tests passing increased to **23 / 23**.
+- **Two-Method Screen Vision & OCR Engine (`ScreenCaptureService`, `ScreenVisionManager`)**:
+  - Explicitly separated **Method A** (Accessibility tree observation) from **Method B** (`MediaProjection` Foreground Service with `foregroundServiceType="mediaProjection"` & `MediaProjection.Callback.onStop()` cleanup, plus Android 11+ `AccessibilityService.takeScreenshot` fallback) paired with on-device ML Kit `TextRecognition` OCR and optional Vision LLM analysis.
+- **Accessibility Debug Dashboard (`AccessibilityDebugScreen`)**:
+  - Routed in `MainActivity` (`accessibility_debug`), Command Hub, `DiagnosticsScreen`, and `TouchGuardScreen`.
+  - Shows all 11 live telemetry fields (permission enabled/disabled, service connected/disconnected, foreground app, node counts, last action & result, gesture capability, screenshot permission status, last error), all 7 real test actions (`Test Screen Reading`, `Test Click`, `Test Scroll Down`, `Test Scroll Up`, `Test Swipe Left`, `Test Swipe Right`, `Reconnect Service`), `MediaProjection` + OCR buttons, and built-in interactive test targets (live counter button, 20-item scrollable list, horizontal card strip).
+- **Gemini Live Screen Vision Tools (`GeminiLiveAudioClient`)**:
+  - Added `observe_screen`, `click_screen_element`, `scroll_screen`, `swipe_screen`, `long_press_screen`, `navigate_back`, and `capture_screen_ocr` tool declarations and handlers.
+- **V4.1 Automated Test Suite (`ZehnV41AccessibilityRepairTest`)**:
+  - Added 12 Robolectric multi-SDK tests (`@Config(sdk = [28, 35])`); total verified test suite expanded to **35 / 35 passing** alongside verified `app-debug.apk`.
+
+---
+
+## V4.0 — Autonomous GitHub Research, Self-Upgrade & APK Build Engine
+*(Preserved in full: `AutonomousResearchAgent`, `RepoSafetyAnalyzer`, `GitHubAutoDevEngine`, `ReleaseUpdateManager`, `UpgradeScheduler`, `AutonomousUpgradeCenterScreen`, Room v2 migration, and CI/CD workflow.)*
 
 ---
 
 ## V3.3 — Autonomous Android Assistant Upgrade
-*(Preserved in full: HTTPS network security config, Gemini `x-goog-api-key` headers, Hugging Face Inference Router, key-slot CRUD + latency/usage metrics, bilingual English/Urdu/Hindi/Roman Urdu voice commands, Continuous Conversation mode, CameraX photo/video/flash/lens flip, Call Screening + VIP filter + Auto-Answer + CallCapabilityReport, Open-Source Discovery UI, and Honest Diagnostics.)*
+*(Preserved in full: HTTPS network security config, Gemini `x-goog-api-key` headers, Hugging Face Inference Router, key-slot CRUD + latency/usage metrics, bilingual voice commands, Continuous Conversation mode, CameraX photo/video/flash/lens flip, Call Screening + VIP filter + Auto-Answer, Open-Source Discovery UI, and Honest Diagnostics.)*

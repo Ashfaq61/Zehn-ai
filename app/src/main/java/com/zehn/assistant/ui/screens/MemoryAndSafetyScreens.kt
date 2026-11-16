@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.zehn.assistant.agent.ZehnAccessibilityService
 import com.zehn.assistant.data.model.MemoryTier
 import com.zehn.assistant.ui.ZehnViewModel
 import com.zehn.assistant.ui.components.ClayActionButton
@@ -331,11 +332,15 @@ private fun SafetySwitchRow(
 }
 
 @Composable
-fun TouchGuardScreen(vm: ZehnViewModel) {
+fun TouchGuardScreen(
+    vm: ZehnViewModel,
+    onOpenAccessibilityDebug: () -> Unit = {}
+) {
     val context = LocalContext.current
     val policy by vm.policy.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
     val accSvc by vm.accessibilityConnected.collectAsStateWithLifecycle()
+    val a11yPermEnabled = remember(accSvc) { ZehnAccessibilityService.isAccessibilityPermissionEnabled(context) }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -355,15 +360,25 @@ fun TouchGuardScreen(vm: ZehnViewModel) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Accessibility Service", style = MaterialTheme.typography.titleMedium, color = ZehnColors.FrostWhite)
                         Text(
-                            if (accSvc != null) "CONNECTED & ACTIVE" else "NOT ENABLED",
+                            text = when {
+                                accSvc != null -> "CONNECTED & ACTIVE"
+                                a11yPermEnabled -> "ENABLED IN SETTINGS (DISCONNECTED — RECONNECT)"
+                                else -> "DISABLED"
+                            },
                             style = MaterialTheme.typography.labelMedium,
                             color = if (accSvc != null) ZehnColors.Emerald else ZehnColors.Amber
                         )
                     }
-                    ClayActionButton(text = "Open Settings", onClick = {
+                    ClayActionButton(text = "Settings", onClick = {
                         context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     })
                 }
+                Spacer(Modifier.height(8.dp))
+                ClayActionButton(
+                    text = "Open Accessibility Debug Dashboard",
+                    modifier = Modifier.fillMaxWidth().testTag("touch_guard_open_a11y_debug_button"),
+                    onClick = onOpenAccessibilityDebug
+                )
             }
         }
 
