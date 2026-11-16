@@ -170,7 +170,14 @@ data class DiscoveredToolEntity(
     val isDuplicate: Boolean = false,
     val duplicateReason: String = "",
     val htmlUrl: String = "",
-    val evaluatedAt: Long = System.currentTimeMillis()
+    val evaluatedAt: Long = System.currentTimeMillis(),
+    // V4.2 structured scoring, strict pre-filter status, and implementation reports
+    val fitScore: Double = 0.0,
+    val statusTag: String = "Suggested", // Suggested, Pending Approval, Approved, Integrated, Rejected
+    val implementationPlan: String = "",
+    val hasModelCard: Boolean = true,
+    val activelyMaintained: Boolean = true,
+    val rejectionReason: String = ""
 )
 
 @Serializable
@@ -193,14 +200,18 @@ data class UpgradeProposalEntity(
     val lastBuildConclusion: String = "",
     val lastErrorReport: String = "",
     val createdAt: Long = System.currentTimeMillis(),
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    // V4.2 additions
+    val fitScore: Double = 0.0,
+    val protectedPathsFlagged: String = "",
+    val retryAttempts: Int = 0
 )
 
 @Serializable
 @Entity(tableName = "dev_run_history")
 data class AutoDevRunEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val actionType: String, // RESEARCH, BRANCH, COMMIT, PR, BUILD_POLL, MERGE, ROLLBACK, RELEASE_CHECK
+    val actionType: String, // RESEARCH, BRANCH, COMMIT, PR, BUILD_POLL, MERGE, ROLLBACK, RELEASE_CHECK, ISSUE, SELF_REPAIR
     val branchOrRef: String = "",
     val httpStatus: Int = 0,
     val summary: String,
@@ -230,6 +241,21 @@ data class ReleaseRecordEntity(
     val compatibilityNote: String = "",
     val publishedAt: String = "",
     val notified: Boolean = false,
-    val detectedAt: Long = System.currentTimeMillis()
+    val detectedAt: Long = System.currentTimeMillis(),
+    // V4.2 updater verification & installation history
+    val isPrerelease: Boolean = false,
+    val verifiedSha256: Boolean = false,
+    val verifiedSigningCert: Boolean = false,
+    val installedFromApp: Boolean = false,
+    val installedAt: Long = 0L
 )
 
+@Serializable
+@Entity(tableName = "upgrade_error_logs")
+data class UpgradeErrorLogEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val source: String, // DISCOVERY, AUTO_DEV, UPDATER, SAFE_MODE, INSTALLER
+    val message: String,
+    val detail: String = "",
+    val timestamp: Long = System.currentTimeMillis()
+)

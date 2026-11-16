@@ -39,6 +39,7 @@ import com.zehn.assistant.ai.ProviderConnectionTestResult
 import com.zehn.assistant.ai.RagEngine
 import com.zehn.assistant.data.BackupManager
 import com.zehn.assistant.data.PreferencesRepository
+import com.zehn.assistant.data.StorageBatteryTelemetry
 import com.zehn.assistant.data.ZehnSettings
 import com.zehn.assistant.data.db.ActionLogDao
 import com.zehn.assistant.data.db.ActionLogEntity
@@ -58,6 +59,7 @@ import com.zehn.assistant.data.db.SkillEntity
 import com.zehn.assistant.data.db.TriggerDao
 import com.zehn.assistant.data.db.TriggerEntity
 import com.zehn.assistant.data.db.UpgradeCenterDao
+import com.zehn.assistant.data.db.UpgradeErrorLogEntity
 import com.zehn.assistant.data.db.UpgradeProposalEntity
 import com.zehn.assistant.data.db.WorkflowDao
 import com.zehn.assistant.data.db.WorkflowEntity
@@ -76,10 +78,14 @@ import com.zehn.assistant.security.KeystoreCryptoManager
 import com.zehn.assistant.security.PendingConfirmationRequest
 import com.zehn.assistant.security.SafetyPolicyManager
 import com.zehn.assistant.security.SafetyPolicyState
+import com.zehn.assistant.upgrade.ApkDownloadProgress
+import com.zehn.assistant.upgrade.ApkInstallStatus
 import com.zehn.assistant.upgrade.AutoDevExecutionState
 import com.zehn.assistant.upgrade.AutonomousResearchAgent
 import com.zehn.assistant.upgrade.GitHubAutoDevEngine
 import com.zehn.assistant.upgrade.GitHubConnectionStatus
+import com.zehn.assistant.upgrade.InstallSessionTracker
+import com.zehn.assistant.upgrade.RealGitHubMetrics
 import com.zehn.assistant.upgrade.ReleaseUpdateManager
 import com.zehn.assistant.upgrade.ResearchCycleSummary
 import com.zehn.assistant.upgrade.UpgradeScheduler
@@ -99,8 +105,10 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -223,9 +231,25 @@ class ZehnViewModel @Inject constructor(
     val releaseHistory: StateFlow<List<ReleaseRecordEntity>> = upgradeCenterDao.observeReleases()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val upgradeErrorLogs: StateFlow<List<UpgradeErrorLogEntity>> = upgradeCenterDao.observeErrorLogs()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val researchState: StateFlow<ResearchCycleSummary> = researchAgent.state
     val githubConnection: StateFlow<GitHubConnectionStatus> = autoDevEngine.connection
     val autoDevState: StateFlow<AutoDevExecutionState> = autoDevEngine.devState
+    val realGitHubMetrics: StateFlow<RealGitHubMetrics> = autoDevEngine.realMetrics
+    val apkDownloadProgress: StateFlow<ApkDownloadProgress> = releaseUpdateManager.downloadProgress
+    val installStatus: StateFlow<ApkInstallStatus> = InstallSessionTracker.status
+    val safeModeActive: StateFlow<Boolean> = crashRecoveryManager.safeModeActive
+
+    private val _storageTelemetry = MutableStateFlow(backupManager.computeStorageBatteryTelemetry())
+    val storageTelemetry: StateFlow<StorageBatteryTelemetry> = _storageTelemetry.asStateFlow()
+
+    private val _safeModeChatReply = MutableStateFlow("")
+    val safeModeChatReply: StateFlow<String> = _safeModeChatReply.asStateFlow()
+
+    private val _safeModeChatBusy = MutableStateFlow(false)
+    val safeModeChatBusy: StateFlow<Boolean> = _safeModeChatBusy.asStateFlow()
 
     private val _selectedProjectId = MutableStateFlow<Long?>(null)
     val selectedProjectId: StateFlow<Long?> = _selectedProjectId.asStateFlow()
@@ -301,6 +325,25 @@ class ZehnViewModel @Inject constructor(
                     }
                     is LiveChatTranscriptEvent.CommittedTurn -> {
                         persistVoiceTranscriptToChat(ev.role, ev.content, ev.modelUsed)
+                    }
+                }
+            }
+        }
+        // V4.2 startup release watcher & scheduled discovery initialization (skipped in Safe Mode or when Emergency Paused)
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                _storageTelemetry.value = backupManager.computeStorageBatteryTelemetry()
+                val s = prefs.settings.first()
+                if (!crashRecoveryManager.safeModeActive.value && !s.allAutoUpgradesPaused) {
+                    upgradeScheduler.applySchedule(
+                        mode = s.researchScheduleMode,
+                        focusMode = s.researchFocusMode,
+                        paused = s.researchPaused,
+                        wifiOnlyDiscovery = s.discoveryWifiOnly
+                    )
+                    if (s.githubRepoSlug.contains('/')) {
+                        autoDevEngine.refreshRealGitHubMetrics()
+                        releaseUpdateManager.checkForVerifiedReleaseUpdate(notifyIfNewer = true)
                     }
                 }
             }
@@ -1013,6 +1056,200 @@ class ZehnViewModel @Inject constructor(
 
     fun clearDevRunHistory() = viewModelScope.launch {
         upgradeCenterDao.clearDevRuns()
+    }
+
+    // ---- V4.2 Self-Upgrade, In-App Updater, Safe Mode & Health Actions ----
+
+    fun togglePauseAllAutoUpgrades() = viewModelScope.launch {
+        val currentPaused = settings.value.allAutoUpgradesPaused
+        val nextPaused = !currentPaused
+        prefs.updateSettings { it.copy(allAutoUpgradesPaused = nextPaused) }
+        if (nextPaused) {
+            researchAgent.stopResearch()
+            autoDevEngine.stopAll()
+            upgradeScheduler.pauseAllWorkersImmediately()
+            _toastBanner.value = "All auto-upgrades PAUSED immediately."
+        } else {
+            val s = settings.value
+            upgradeScheduler.applySchedule(
+                mode = s.researchScheduleMode,
+                focusMode = s.researchFocusMode,
+                paused = s.researchPaused,
+                wifiOnlyDiscovery = s.discoveryWifiOnly
+            )
+            _toastBanner.value = "Auto-upgrades RESUMED."
+        }
+    }
+
+    fun updateDiscoveryConfig(
+        topicsCsv: String,
+        wifiOnly: Boolean,
+        autoApprove: Boolean,
+        scheduleMode: String,
+        focusMode: String
+    ) = viewModelScope.launch {
+        prefs.updateSettings {
+            it.copy(
+                discoveryTopicsCsv = topicsCsv.trim().ifBlank { com.zehn.assistant.data.DEFAULT_DISCOVERY_TOPICS },
+                discoveryWifiOnly = wifiOnly,
+                autoApproveEnabled = autoApprove
+            )
+        }
+        upgradeScheduler.applySchedule(
+            mode = scheduleMode,
+            focusMode = focusMode,
+            paused = settings.value.researchPaused || settings.value.allAutoUpgradesPaused,
+            wifiOnlyDiscovery = wifiOnly
+        )
+        _toastBanner.value = "Saved discovery topics & Wi-Fi/battery policy"
+    }
+
+    fun updateUpdaterConfig(
+        channel: String,
+        updaterWifiOnly: Boolean,
+        autoMergeOnGreen: Boolean,
+        allowWorkflowEdits: Boolean,
+        notifyUpdateReady: Boolean,
+        notifyBuildFailure: Boolean
+    ) = viewModelScope.launch {
+        prefs.updateSettings {
+            it.copy(
+                releaseChannel = channel,
+                updaterWifiOnly = updaterWifiOnly,
+                autoMergeOnGreen = autoMergeOnGreen,
+                allowWorkflowEdits = allowWorkflowEdits,
+                notifyOnUpdateReady = notifyUpdateReady,
+                notifyOnBuildFailure = notifyBuildFailure
+            )
+        }
+        _toastBanner.value = "Saved Updater ($channel channel, Wi-Fi-only=$updaterWifiOnly)"
+    }
+
+    fun downloadAndInstallRelease(release: ReleaseRecordEntity, bypassWifiOnly: Boolean = false) = viewModelScope.launch {
+        val dlRes = releaseUpdateManager.downloadAndVerifyReleaseApk(release, bypassWifiOnly = bypassWifiOnly)
+        dlRes.onFailure { err ->
+            _toastBanner.value = err.message ?: "APK verification/download failed"
+            refreshStorageTelemetry()
+        }.onSuccess { apkFile ->
+            refreshStorageTelemetry()
+            val installRes = releaseUpdateManager.installVerifiedApk(release, apkFile)
+            _toastBanner.value = installRes.message
+            if (installRes.needsUnknownSourcesPermission) {
+                runCatching { app.startActivity(releaseUpdateManager.buildManageUnknownSourcesIntent()) }
+            }
+            refreshStorageTelemetry()
+        }
+    }
+
+    fun openUnknownSourcesSettings() {
+        runCatching { app.startActivity(releaseUpdateManager.buildManageUnknownSourcesIntent()) }
+            .onFailure { _toastBanner.value = "Open Android Settings -> Install unknown apps -> Allow Zehn AI" }
+    }
+
+    fun refreshRealMetricsAndTelemetry() = viewModelScope.launch {
+        refreshStorageTelemetry()
+        autoDevEngine.refreshRealGitHubMetrics()
+    }
+
+    fun refreshStorageTelemetry() {
+        _storageTelemetry.value = backupManager.computeStorageBatteryTelemetry()
+    }
+
+    fun restorePreviousVersionRollbackPr(targetTag: String = "") = viewModelScope.launch {
+        val res = autoDevEngine.createRollbackPrForPreviousVersion(targetReleaseTag = targetTag)
+        _toastBanner.value = res.fold(
+            onSuccess = { it },
+            onFailure = { err -> err.message ?: "Rollback PR failed" }
+        )
+    }
+
+    fun createPreUpdateBackup() = viewModelScope.launch {
+        val res = backupManager.createPreUpdateBackupSnapshot("manual")
+        refreshStorageTelemetry()
+        _toastBanner.value = res.fold(
+            onSuccess = { f -> "Saved backup snapshot: ${f.name}" },
+            onFailure = { err -> err.message ?: "Backup snapshot failed" }
+        )
+    }
+
+    fun restoreLatestPreUpdateBackup() = viewModelScope.launch {
+        val res = backupManager.restoreLatestPreUpdateBackup()
+        refreshStorageTelemetry()
+        _toastBanner.value = res.fold(
+            onSuccess = { count -> "Restored $count items from pre-update backup snapshot" },
+            onFailure = { err -> err.message ?: "No backup snapshot to restore" }
+        )
+    }
+
+    fun clearUpgradeErrorLogs() = viewModelScope.launch {
+        upgradeCenterDao.clearErrorLogs()
+        _toastBanner.value = "Cleared local upgrade error log"
+    }
+
+    fun createSafeModeGitHubIssue() = viewModelScope.launch {
+        val crashReport = crashRecoveryManager.lastCrashReport.value
+        val trace = listOfNotNull(crashReport?.sanitizedStackTrace, _crashFileText.value)
+            .firstOrNull { it.isNotBlank() }
+            ?: crashReport?.sanitizedMessage
+            ?: "Repeated startup crash"
+        val res = autoDevEngine.createGitHubIssueForCrash(
+            title = crashReport?.exceptionType ?: "RepeatedCrash",
+            sanitizedCrashLog = trace
+        )
+        _toastBanner.value = res.fold(
+            onSuccess = { it },
+            onFailure = { err -> err.message ?: "Could not create GitHub issue" }
+        )
+    }
+
+    fun queueSafeModeAutoDevFix() = viewModelScope.launch {
+        val crashReport = crashRecoveryManager.lastCrashReport.value
+        val trace = listOfNotNull(crashReport?.sanitizedStackTrace, _crashFileText.value)
+            .firstOrNull { it.isNotBlank() }
+            ?: crashReport?.sanitizedMessage
+            ?: "Repeated startup crash"
+        val res = autoDevEngine.createCrashFixAutoDevTask(trace)
+        _toastBanner.value = res.fold(
+            onSuccess = { p -> "Crash fix task '${p.branchName}' (${p.status})" },
+            onFailure = { err -> err.message ?: "Could not stage Auto-Dev crash fix" }
+        )
+    }
+
+    fun exitSafeMode() {
+        crashRecoveryManager.exitSafeMode()
+        clearCrashLogFile()
+        _toastBanner.value = "Exited Safe Mode"
+    }
+
+    fun sendSafeModeBasicChat(prompt: String) = viewModelScope.launch {
+        val clean = prompt.trim()
+        if (clean.isEmpty() || _safeModeChatBusy.value) return@launch
+        _safeModeChatBusy.value = true
+        _safeModeChatReply.value = ""
+        try {
+            val acc = StringBuilder()
+            aiRouter.routeAndStream(emptyList(), clean).collect { ev ->
+                if (ev.delta.isNotEmpty()) {
+                    acc.append(ev.delta)
+                    _safeModeChatReply.value = acc.toString()
+                }
+                if (ev.error != null && acc.isEmpty()) {
+                    _safeModeChatReply.value = ev.error
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _safeModeChatReply.value = "Safe Mode chat error: ${e.message}"
+        } finally {
+            _safeModeChatBusy.value = false
+        }
+    }
+
+    fun runVoiceHealthTest() = viewModelScope.launch {
+        val msg = runCatching { voiceCoordinator.runVoiceHealthSelfTest() }
+            .getOrElse { "Voice check failed: ${it.message}" }
+        _toastBanner.value = msg
     }
 
     // ---- V4.1 Accessibility Debug Dashboard & Screen Vision Actions ----

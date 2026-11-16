@@ -22,6 +22,7 @@ class ZehnApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        crashRecoveryManager.recordStartupVersion(BuildConfig.VERSION_CODE)
         installGlobalCrashLogger()
         createNotificationChannels()
     }
@@ -39,15 +40,17 @@ class ZehnApplication : Application() {
                 val deviceModel = "${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})"
                 val androidVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
 
+                val sanitizedTrace = crashRecoveryManager.sanitize(sw.toString(), maxLength = 24_000)
                 val logContent = buildString {
                     appendLine("=== Zehn AI Crash Log ===")
+                    appendLine("Version: ${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
                     appendLine("Time: $formattedTime")
                     appendLine("Device Model: $deviceModel")
                     appendLine("Android Version: $androidVersion")
                     appendLine("Thread: ${thread.name}")
                     appendLine()
                     appendLine("Stack Trace:")
-                    append(sw.toString())
+                    append(sanitizedTrace)
                 }
                 crashFile.writeText(logContent)
             } catch (_: Throwable) {

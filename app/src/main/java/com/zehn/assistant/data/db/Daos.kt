@@ -196,6 +196,9 @@ interface UpgradeCenterDao {
     @Query("SELECT * FROM upgrade_proposals ORDER BY updatedAt DESC LIMIT 100")
     fun observeProposals(): Flow<List<UpgradeProposalEntity>>
 
+    @Query("SELECT * FROM upgrade_proposals ORDER BY updatedAt DESC LIMIT 100")
+    suspend fun getProposalsOnce(): List<UpgradeProposalEntity>
+
     @Query("SELECT * FROM upgrade_proposals WHERE id = :id LIMIT 1")
     suspend fun getProposalById(id: Long): UpgradeProposalEntity?
 
@@ -228,5 +231,13 @@ interface UpgradeCenterDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertRelease(release: ReleaseRecordEntity): Long
-}
 
+    @Query("SELECT * FROM upgrade_error_logs ORDER BY timestamp DESC LIMIT 200")
+    fun observeErrorLogs(): Flow<List<UpgradeErrorLogEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertErrorLog(log: UpgradeErrorLogEntity): Long
+
+    @Query("DELETE FROM upgrade_error_logs")
+    suspend fun clearErrorLogs()
+}

@@ -1,12 +1,12 @@
-# MAHI / Zehn AI V4.1 — Complete Feature Audit (`FEATURE_STATUS.md`)
+# MAHI / Zehn AI V4.2 — Complete Feature Audit (`FEATURE_STATUS.md`)
 
-**Package:** `com.zehn.assistant` | **Version:** `4.1.0` (`versionCode = 5`) | **Target SDK:** 35 | **Min SDK:** 24  
+**Package:** `com.zehn.assistant` | **Version:** `4.1.0` (`versionCode = 5`, CI releases set `4.0.<run>` via Gradle properties) | **Target SDK:** 35 | **Min SDK:** 24  
 **Verified Automated Checks:**
 - `compile_applet` (Debug Kotlin + KSP + Hilt + Manifest + Resources): **PASSED**
-- `gradle :app:testDebugUnitTest :app:assembleDebug --console=plain`: **35 / 35 tests PASSED** (0 failures, 0 skipped) across `ExampleUnitTest` (1), `SafetyAndIntentTest` (3), `ZehnRobolectricTest` (2), `ZehnCriticalFeaturesTest` (7), `ZehnV33FeaturesTest` (6), `ZehnV40AutonomousUpgradeTest` (4), and `ZehnV41AccessibilityRepairTest` (12, executed on both API 28 and API 35 Robolectric profiles).
-- Installable Debug APK assembled & verified (`app-debug.apk`, 85 MB).
+- `gradle :app:testDebugUnitTest :app:assembleDebug --console=plain`: **41 / 41 tests PASSED** (0 failures, 0 skipped) across `ExampleUnitTest` (1), `SafetyAndIntentTest` (3), `ZehnRobolectricTest` (2), `ZehnCriticalFeaturesTest` (7), `ZehnV33FeaturesTest` (6), `ZehnV40AutonomousUpgradeTest` (4), `ZehnV41AccessibilityRepairTest` (12, API 28 & 35), and `ZehnV42SelfUpgradeTest` (6).
+- Installable Debug APK assembled & verified (`assembleDebug` succeeded).
 
-> Physical device features (OS-bound Accessibility Service connection, live `dispatchGesture` execution across third-party apps such as WhatsApp, Settings, Browser, and YouTube, live 16kHz/24kHz Gemini Live audio, CameraX preview hardware, MediaProjection consent dialog, and CI GitHub Actions runner execution) cannot run in this headless cloud environment and are honestly classified as `2. Implemented but not tested.`
+> Physical device features (OS `PackageInstaller` session UI & `REQUEST_INSTALL_PACKAGES` grant, OS-bound Accessibility Service connection, live `dispatchGesture` execution across third-party apps, live 16kHz/24kHz Gemini Live audio, CameraX preview hardware, MediaProjection consent dialog, and CI GitHub Actions runner execution) cannot run in this headless cloud environment and are honestly classified as `2. Implemented but not tested.`
 
 ---
 
@@ -22,6 +22,16 @@
 ---
 
 ## Detailed Subsystem Audit
+
+### 0. Autonomous Self-Upgrade, Release Builder, Verified Updater & Safe Mode (V4.2)
+
+| Feature | Classification | Notes & Evidence |
+|---|---|---|
+| Continuous Discovery Pre-Filters & Scoring (`AutonomousResearchAgent`, `RepoSafetyAnalyzer`, `UpgradeScheduler`) | **1. Fully implemented and tested.** *(GPL/AGPL/non-commercial/unknown rejection, stale >18 mo check, HF missing model card, RAM limit, fit < 7.0 Suggested gating, protected path flagging, Room v2->v3 migration)* / **2. Implemented but not tested.** *(live periodic WorkManager execution on Wi-Fi)* | Verified in `ZehnV42SelfUpgradeTest`. Daily Wi-Fi-only / battery-aware `WorkManager` queries GitHub REST API + Hugging Face Hub API from editable topics; auto-approve only if `fitScore >= 8.0`, switch ON (default OFF), and zero protected paths. |
+| GitHub Auto-Dev PR Cap, Cycle Telemetry, Issue Filing & Rollback PR (`GitHubAutoDevEngine`) | **1. Fully implemented and tested.** *(max 2 open PRs, exact cycle stages `Idle`/`Running`/`Waiting for CI`/`Waiting for approval`/`Failed`, secret redaction on Issues, monotonic Rollback PR, rate-limit backoff)* / **2. Implemented but not tested.** *(live remote repo & 5x CI self-repair loop)* | Verified in `ZehnV42SelfUpgradeTest`. Real GitHub open/merged PR and workflow counts; 403/429 `Retry-After`/`X-RateLimit-Reset` backoff; protected paths always require manual approval. |
+| CI/CD Release & Branch Verification Workflows (`.github/workflows/release.yml`, `android-build.yml`, `build.yml`) | **2. Implemented but not tested.** *(valid YAML workflow definitions; requires GitHub Actions runner)* | `release.yml` decodes fixed `debug.keystore.base64`/`DEBUG_KEYSTORE_BASE64`, assigns `versionCode = GITHUB_RUN_NUMBER` & `versionName = "4.0.<run>"`, signs APK, generates `.sha256`, builds changelog from merged PRs, and publishes GitHub Release via `softprops/action-gh-release@v2`. |
+| In-App Verified Updater & Pre-Update Backup (`ReleaseUpdateManager`, `PackageInstallStatusReceiver`, `BackupManager`) | **1. Fully implemented and tested.** *(Stable/Beta channel filter, monotonic upgrade guard, HTTP `Range` resume in `cacheDir/updates/`, SHA-256 + cert digest verification, pre-update JSON snapshot & restore)* / **2. Implemented but not tested.** *(on-device `PackageInstaller` Session UI & `REQUEST_INSTALL_PACKAGES` grant)* | Verified in `ZehnV42SelfUpgradeTest`. Supports private repos via Keystore PAT, Wi-Fi-only toggle + byte counter, cache cleanup broadcast receiver on install success, and automatic `BackupManager` snapshot before install. |
+| Crash Guard Safe Mode & Health/Emergency Controls (`CrashRecoveryManager`, `SafeModeScreen`, `AutonomousUpgradeCenterScreen`, `HomeScreen`) | **1. Fully implemented and tested.** *(3 crashes in 5 min window activation, exit reset, secret sanitization)* / **2. Implemented but not tested.** *(interactive Compose UI flows on device)* | `SafeModeScreen` offers sanitized crash log, minimal Basic Chat, Create GitHub Issue, Trigger Auto-Dev Fix, Restore Backup, and Exit Safe Mode. Includes `HomeScreen` Emergency Pause toggle, 5-tab Upgrade Center (`Proposals`, `Discovery`, `Updater`, `Health`, `Monitor & Logs`), provider reachability & Voice Health Check (`Last Successful Voice Test`), Storage/Battery monitor, and sanitized error log viewer. |
 
 ### 1. Screen Vision, Accessibility Automation & Gesture Repair (V4.1)
 
@@ -59,6 +69,6 @@
 
 | Capability | Classification | Technical Reason & Implemented Alternative |
 |---|---|---|
-| Self-Rewriting Installed APK Binary / Silent APK Install | **6. Blocked by Android or device restrictions.** | Handled exclusively via GitHub Auto-Dev PRs, GitHub Actions CI builds, and standard Android install confirmation. |
+| Self-Rewriting Installed APK Binary / Dynamic DEX/JAR Loading | **6. Blocked by Android or device restrictions.** | Handled exclusively via GitHub Auto-Dev PRs, fixed-keystore GitHub Actions CI builds (`release.yml`), SHA-256 + cert checks, and Android `PackageInstaller` Session API (`REQUEST_INSTALL_PACKAGES`). |
 | Injecting TTS Audio Directly into Cellular Call Uplink Microphone | **6. Blocked by Android or device restrictions.** | Blocked by non-root Android Telecom APIs (`canInjectAudioIntoCellularUplink = false`). |
 | Force-Stopping Arbitrary Third-Party Apps / Silent Background Mic or Camera | **6. Blocked by Android or device restrictions.** | Restricted to system/signature privileges; Zehn uses Home/Back global actions and visible foreground notifications. |

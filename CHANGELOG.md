@@ -1,5 +1,27 @@
 # CHANGELOG — Zehn AI (`com.zehn.assistant`)
 
+## V4.2 — Complete Self-Upgrade System (Discovery, Release CI, Verified Updater & Safe Mode)
+
+### Added
+- **Continuous Discovery Pipeline (`AutonomousResearchAgent`, `RepoSafetyAnalyzer`, `UpgradeScheduler`, `ResearchScheduleWorker`)**:
+  - Daily Wi-Fi/battery-aware `WorkManager` scan querying GitHub REST API and Hugging Face Hub API from an editable topic list.
+  - Strict pre-filters reject GPL/AGPL/non-commercial/unknown licenses, unmaintained repos (>18 months stale), missing Hugging Face model cards, and over-RAM / Android-incompatible items before scoring.
+  - Items scoring `< 7.0` remain `"Suggested"` (never auto-integrated); items `>= 8.0` auto-approve only when `"Auto-approve"` is ON (default OFF) and touch no protected paths (`AndroidManifest.xml`, Accessibility, Security/Touch Guard, Keystore/tokens, signing, workflows).
+- **Hardened GitHub Auto-Dev (`GitHubAutoDevEngine`)**:
+  - Enforces a strict max of 2 open Auto-Dev PRs, duplicate branch prevention, exact cycle telemetry (`Idle`, `Running`, `Waiting for CI`, `Waiting for approval`, `Failed`), real GitHub open/merged PR and CI counts, `Retry-After`/`X-RateLimit-Reset` 403/429 backoff, and non-downgrading rollback PRs.
+- **Monotonic Release CI/CD & Fixed Keystore Signing (`.github/workflows/release.yml`, `android-build.yml`, `build.yml`)**:
+  - `release.yml` runs on `push` to `main`, decodes the committed `debug.keystore.base64` / `DEBUG_KEYSTORE_BASE64` (never regenerating certs), sets `versionCode = GITHUB_RUN_NUMBER` and `versionName = "4.0.<versionCode>"`, publishes signed APK + `.sha256` + merged PR changelog via `softprops/action-gh-release@v2`. Branch/PR workflows upload artifacts only.
+- **Verified In-App Updater & Pre-Update Backup (`ReleaseUpdateManager`, `PackageInstallStatusReceiver`, `BackupManager`)**:
+  - Checks GitHub Releases every 4 hours, on startup, and on demand (`STABLE` vs `BETA` channels, private repo PAT support, strict upward `versionCode` guard).
+  - Resumable HTTP `Range` downloads into `cacheDir/updates/`, Wi-Fi-only toggle + byte counter, mandatory SHA-256 & `GET_SIGNING_CERTIFICATES` key match check, automatic `BackupManager` snapshot before install, and `PackageInstaller` Session API (`REQUEST_INSTALL_PACKAGES` + `USER_ACTION_NOT_REQUIRED` on Android 12+).
+- **Crash Guard Safe Mode, Emergency Pause & Health Monitor (`CrashRecoveryManager`, `SafeModeScreen`, `AutonomousUpgradeCenterScreen`, `HomeScreen`, `ZehnDatabase` v3)**:
+  - Triggers Safe Mode automatically after 3 crashes within 5 minutes, providing sanitized crash log, minimal Basic Chat, Create GitHub Issue, Trigger Auto-Dev Fix, Restore Backup, and Exit Safe Mode.
+  - Added `HomeScreen` Emergency Pause toggle, `MIGRATION_2_3`, 5-tab Upgrade Center (`Proposals`, `Discovery`, `Updater`, `Health`, `Monitor & Logs`), live provider tests, Voice Health Check (`Last Successful Voice Test`), and Storage/Battery/Error Log panels.
+- **V4.2 Verification (`ZehnV42SelfUpgradeTest`)**:
+  - Added 6 Robolectric unit tests verifying Room v2->v3 migration, strict pre-filters, fit-score & protected-path gating, max-2 PRs & secret redaction, Range/SHA-256/cert updater checks + backups, and 3-crash/5-min Safe Mode activation; total verified suite stands at **41 / 41 passing**.
+
+---
+
 ## V4.1 — Screen Vision & Android Accessibility Automation Repair (`versionCode = 5`)
 
 ### Fixed

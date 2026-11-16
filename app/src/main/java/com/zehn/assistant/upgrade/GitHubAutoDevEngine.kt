@@ -1,11 +1,12 @@
 package com.zehn.assistant.upgrade
 
+import com.zehn.assistant.BuildConfig
 import com.zehn.assistant.ai.AiEngineRouter
 import com.zehn.assistant.ai.CloudLlmClient
-import com.zehn.assistant.ai.LlmMessage
 import com.zehn.assistant.data.PreferencesRepository
 import com.zehn.assistant.data.db.AutoDevRunEntity
 import com.zehn.assistant.data.db.UpgradeCenterDao
+import com.zehn.assistant.data.db.UpgradeErrorLogEntity
 import com.zehn.assistant.data.db.UpgradeProposalEntity
 import com.zehn.assistant.security.KeystoreCryptoManager
 import kotlinx.coroutines.Dispatchers
@@ -39,16 +40,26 @@ data class GitHubConnectionStatus(
 data class WorkflowBuildStatus(
     val runId: Long = 0L,
     val branch: String = "",
-    val status: String = "IDLE", // queued, in_progress, completed, IDLE
+    val status: String = "Idle", // queued, in_progress, completed, Idle
     val conclusion: String = "", // success, failure, cancelled, ""
     val htmlUrl: String = "",
     val failedLogTail: String = "",
     val updatedAt: String = ""
 )
 
+data class RealGitHubMetrics(
+    val openAutoDevPrCount: Int = 0,
+    val mergedAutoDevPrCount: Int = 0,
+    val passedCiRunsCount: Int = 0,
+    val failedCiRunsCount: Int = 0,
+    val openPrBranches: List<String> = emptyList(),
+    val syncedWithGitHub: Boolean = false,
+    val lastSyncedAt: Long = 0L
+)
+
 data class AutoDevExecutionState(
     val running: Boolean = false,
-    val activeCycleStage: String = "IDLE", // DISCOVER, ANALYZE, PLAN, IMPLEMENT, TEST, REVIEW, BUILD, NOTIFY
+    val activeCycleStage: String = "Idle", // Strict cycle states: Idle, Running, Waiting for CI, Waiting for approval, Failed
     val currentBranch: String = "",
     val lastBuild: WorkflowBuildStatus = WorkflowBuildStatus(),
     val statusMessage: String = "Idle"
@@ -57,9 +68,13 @@ data class AutoDevExecutionState(
 /**
  * Real GitHub REST & Git Data API automation engine:
  * - Encrypted Keystore PAT only, never embedded or logged
- * - Pre-commit diff secret & safety scanner + workflow edit guard
- * - Branch creation (zehn-auto/...), atomic Git Data API commits, PR creation, Actions polling,
- *   self-repair log inspection (max 5 attempts), safe approval-gated merge, and rollback.
+ * - Rate-limit aware backoff (Retry-After, X-RateLimit-Reset, exponential backoff on 403/429)
+ * - Max 2 open Auto-Dev PRs enforced from GitHub API
+ * - Duplicate PR / branch prevention
+ * - Protected path manual-approval gate (Manifest permissions, Touch Guard/Security, Keystore/Tokens, Workflows, Signing)
+ * - Self-repair loop on failed CI runs (up to 5 attempts, last ~200 log lines + changed files)
+ * - Crash Guard issue creation & Auto-Dev fix task queueing
+ * - Non-downgrading Rollback PR (new higher versionCode build on CI)
  */
 @Singleton
 class GitHubAutoDevEngine @Inject constructor(
@@ -76,6 +91,9 @@ class GitHubAutoDevEngine @Inject constructor(
     private val _devState = MutableStateFlow(AutoDevExecutionState())
     val devState: StateFlow<AutoDevExecutionState> = _devState.asStateFlow()
 
+    private val _realMetrics = MutableStateFlow(RealGitHubMetrics())
+    val realMetrics: StateFlow<RealGitHubMetrics> = _realMetrics.asStateFlow()
+
     @Volatile
     private var stopRequested = false
 
@@ -83,7 +101,7 @@ class GitHubAutoDevEngine @Inject constructor(
         stopRequested = true
         _devState.value = _devState.value.copy(
             running = false,
-            activeCycleStage = "STOPPED",
+            activeCycleStage = STAGE_IDLE,
             statusMessage = "Auto-Dev stopped immediately by user."
         )
     }
@@ -110,6 +128,7 @@ class GitHubAutoDevEngine @Inject constructor(
             val st = GitHubConnectionStatus(connected = false, message = "Token check failed: $err")
             _connection.value = st
             logRun("AUTH_TEST", repoSlug, 401, "GitHub auth failed", err, false)
+            recordError("AUTO_DEV", "GitHub auth failed", err)
             return@withContext st
         }
 
@@ -127,6 +146,7 @@ class GitHubAutoDevEngine @Inject constructor(
             )
             _connection.value = st
             logRun("AUTH_TEST", repoSlug, 403, "Repo check failed", msg, false)
+            recordError("AUTO_DEV", "Repo access denied", msg)
             return@withContext st
         }
 
@@ -145,7 +165,7 @@ class GitHubAutoDevEngine @Inject constructor(
             prefs.updateSettings { it.copy(lastGoodCommitSha = baseSha) }
         }
 
-        val permNote = if (!canPush) "READ-ONLY token (add 'Contents: Read & write' + 'Pull requests' + 'Actions' permissions to push/PR)." else "Read + Push verified."
+        val permNote = if (!canPush) "READ-ONLY token (grant Contents + Pull requests + Actions + Issues to push/PR)." else "Read + Push verified."
         val ok = GitHubConnectionStatus(
             connected = true,
             username = login,
@@ -158,13 +178,105 @@ class GitHubAutoDevEngine @Inject constructor(
         )
         _connection.value = ok
         logRun("AUTH_TEST", repoSlug, 200, "Connected @$login (push=$canPush)", ok.message, true)
+
+        refreshRealGitHubMetrics(repoSlug, token)
         ok
     }
 
     /**
-     * Stages an UpgradeProposal onto its dedicated feature branch (never directly to main/baseBranch),
-     * scans every file diff for secrets/safety/workflows, commits atomically via Git Data API,
-     * opens a Pull Request, and optionally polls the resulting GitHub Actions run.
+     * Fetches real open/merged PR counts and GitHub Actions pass/fail counts from GitHub APIs
+     * so dashboard stats never show fabricated local guesses.
+     */
+    suspend fun refreshRealGitHubMetrics(
+        repoOverride: String? = null,
+        tokenOverride: String? = null
+    ): RealGitHubMetrics = withContext(Dispatchers.IO) {
+        val settings = prefs.settings.first()
+        val repoSlug = (repoOverride ?: settings.githubRepoSlug).trim().trim('/')
+        val token = (tokenOverride ?: crypto.getSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN)).trim()
+        if (token.isBlank() || !repoSlug.contains('/')) {
+            return@withContext _realMetrics.value
+        }
+
+        var openPrs = 0
+        var mergedPrs = 0
+        var passedRuns = 0
+        var failedRuns = 0
+        val openBranches = mutableListOf<String>()
+        var synced = false
+
+        val openPrRes = executeGitHubRequest("GET", "https://api.github.com/repos/$repoSlug/pulls?state=open&per_page=30", token)
+        openPrRes.getOrNull()?.second?.let { raw ->
+            runCatching {
+                val arr = JSONArray(raw)
+                synced = true
+                for (i in 0 until arr.length()) {
+                    val pr = arr.optJSONObject(i) ?: continue
+                    val headRef = pr.optJSONObject("head")?.optString("ref", "").orEmpty()
+                    val title = pr.optString("title", "")
+                    if (headRef.startsWith("zehn-auto") || title.contains("Zehn Auto-Dev", true)) {
+                        openPrs++
+                        if (headRef.isNotBlank()) openBranches.add(headRef)
+                    }
+                }
+            }
+        }
+
+        val closedPrRes = executeGitHubRequest("GET", "https://api.github.com/repos/$repoSlug/pulls?state=closed&per_page=30", token)
+        closedPrRes.getOrNull()?.second?.let { raw ->
+            runCatching {
+                val arr = JSONArray(raw)
+                synced = true
+                for (i in 0 until arr.length()) {
+                    val pr = arr.optJSONObject(i) ?: continue
+                    val headRef = pr.optJSONObject("head")?.optString("ref", "").orEmpty()
+                    val mergedAt = pr.optString("merged_at", "")
+                    val title = pr.optString("title", "")
+                    if (mergedAt.isNotBlank() && mergedAt != "null" &&
+                        (headRef.startsWith("zehn-auto") || title.contains("Zehn Auto-Dev", true))
+                    ) {
+                        mergedPrs++
+                    }
+                }
+            }
+        }
+
+        val runsRes = executeGitHubRequest("GET", "https://api.github.com/repos/$repoSlug/actions/runs?per_page=30", token)
+        runsRes.getOrNull()?.second?.let { raw ->
+            runCatching {
+                val runs = JSONObject(raw).optJSONArray("workflow_runs")
+                if (runs != null) {
+                    synced = true
+                    for (i in 0 until runs.length()) {
+                        val run = runs.optJSONObject(i) ?: continue
+                        when (run.optString("conclusion", "")) {
+                            "success" -> passedRuns++
+                            "failure" -> failedRuns++
+                        }
+                    }
+                }
+            }
+        }
+
+        val next = RealGitHubMetrics(
+            openAutoDevPrCount = openPrs,
+            mergedAutoDevPrCount = mergedPrs,
+            passedCiRunsCount = passedRuns,
+            failedCiRunsCount = failedRuns,
+            openPrBranches = openBranches,
+            syncedWithGitHub = synced,
+            lastSyncedAt = System.currentTimeMillis()
+        )
+        _realMetrics.value = next
+        next
+    }
+
+    /**
+     * Stages an UpgradeProposal onto its dedicated feature branch (never directly to main/baseBranch):
+     * - Enforces max 2 open Auto-Dev PRs at a time
+     * - Enforces zero duplicates
+     * - Enforces manual approval gate when protected paths are touched
+     * - Polls GitHub Actions CI & runs up to 5 LLM repair passes on failure
      */
     suspend fun executeIntegrationProposal(
         proposalId: Long,
@@ -172,6 +284,10 @@ class GitHubAutoDevEngine @Inject constructor(
     ): Result<UpgradeProposalEntity> = withContext(Dispatchers.IO) {
         stopRequested = false
         val settings = prefs.settings.first()
+        if (settings.allAutoUpgradesPaused) {
+            return@withContext Result.failure(IllegalStateException("All auto-upgrades are paused via emergency control."))
+        }
+
         val token = crypto.getSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN).trim()
         val repo = settings.githubRepoSlug.trim()
         val baseBranch = settings.githubBaseBranch.ifBlank { "main" }
@@ -180,10 +296,15 @@ class GitHubAutoDevEngine @Inject constructor(
             ?: return@withContext Result.failure(IllegalArgumentException("Proposal #$proposalId not found."))
 
         if (proposal.riskLevel == "BLOCKED") {
-            return@withContext Result.failure(IllegalStateException("Proposal is blocked by license or security check."))
+            return@withContext Result.failure(IllegalStateException("Proposal blocked by pre-filter or security scan."))
         }
         if (proposal.requiresApproval && proposal.status != "APPROVED" && proposal.status != "STAGED") {
-            return@withContext Result.failure(IllegalStateException("Sensitive proposal requires explicit user approval before integration."))
+            _devState.value = _devState.value.copy(
+                running = false,
+                activeCycleStage = STAGE_WAITING_APPROVAL,
+                statusMessage = "Proposal #${proposal.id} requires manual approval before staging."
+            )
+            return@withContext Result.failure(IllegalStateException("Proposal requires manual approval before integration."))
         }
         if (token.isBlank() || !repo.contains('/')) {
             return@withContext Result.failure(IllegalStateException("Connect GitHub token and 'owner/repo' in Upgrade Center first."))
@@ -194,9 +315,25 @@ class GitHubAutoDevEngine @Inject constructor(
             return@withContext Result.failure(IllegalStateException("Safety rule: never commit directly to protected branch '$baseBranch'."))
         }
 
+        // Enforce max 2 open PRs & zero duplicates from real GitHub APIs
+        val metrics = refreshRealGitHubMetrics(repo, token)
+        if (metrics.openPrBranches.any { it.equals(targetBranch, ignoreCase = true) }) {
+            val dupMsg = "Duplicate PR blocked: an open PR already exists for '$targetBranch'."
+            logRun("PR", targetBranch, 409, "Duplicate PR blocked", dupMsg, false)
+            recordError("AUTO_DEV", dupMsg)
+            _devState.value = _devState.value.copy(running = false, activeCycleStage = STAGE_WAITING_APPROVAL, statusMessage = dupMsg)
+            return@withContext Result.failure(IllegalStateException(dupMsg))
+        }
+        if (metrics.openAutoDevPrCount >= MAX_OPEN_AUTO_DEV_PRS) {
+            val capMsg = "Max $MAX_OPEN_AUTO_DEV_PRS open Auto-Dev PRs reached (${metrics.openAutoDevPrCount}/$MAX_OPEN_AUTO_DEV_PRS). Wait for merge or close a PR."
+            logRun("PR", targetBranch, 429, "Max open PRs cap reached", capMsg, false)
+            _devState.value = _devState.value.copy(running = false, activeCycleStage = STAGE_WAITING_APPROVAL, statusMessage = capMsg)
+            return@withContext Result.failure(IllegalStateException(capMsg))
+        }
+
         _devState.value = AutoDevExecutionState(
             running = true,
-            activeCycleStage = "IMPLEMENT",
+            activeCycleStage = STAGE_RUNNING,
             currentBranch = targetBranch,
             statusMessage = "Creating branch $targetBranch from $baseBranch..."
         )
@@ -206,7 +343,8 @@ class GitHubAutoDevEngine @Inject constructor(
             val err = branchRes.exceptionOrNull()?.message ?: "Branch creation failed"
             val updated = proposal.copy(status = "FAILED", lastErrorReport = err, updatedAt = System.currentTimeMillis())
             upgradeDao.upsertProposal(updated)
-            _devState.value = _devState.value.copy(running = false, activeCycleStage = "ERROR", statusMessage = err)
+            recordError("AUTO_DEV", "Branch creation failed", err)
+            _devState.value = _devState.value.copy(running = false, activeCycleStage = STAGE_FAILED, statusMessage = err)
             return@withContext Result.failure(branchRes.exceptionOrNull()!!)
         }
 
@@ -218,13 +356,19 @@ class GitHubAutoDevEngine @Inject constructor(
         if (!diffScan.clean) {
             val reason = "Pre-commit safety gate blocked commit: ${diffScan.blockingReasons.joinToString("; ")}"
             logRun("COMMIT", targetBranch, 403, "Pre-commit safety blocked", reason, false)
+            recordError("AUTO_DEV", "Pre-commit safety blocked", reason)
             val updated = proposal.copy(status = "FAILED", lastErrorReport = reason, updatedAt = System.currentTimeMillis())
             upgradeDao.upsertProposal(updated)
-            _devState.value = _devState.value.copy(running = false, activeCycleStage = "BLOCKED", statusMessage = reason)
+            _devState.value = _devState.value.copy(running = false, activeCycleStage = STAGE_FAILED, statusMessage = reason)
             return@withContext Result.failure(IllegalStateException(reason))
         }
 
-        _devState.value = _devState.value.copy(activeCycleStage = "COMMIT", statusMessage = "Committing ${changes.size} file(s) to $targetBranch...")
+        val detectedProtected = safetyAnalyzer.detectProtectedPaths(
+            paths = changes.map { it.path },
+            textHint = "${proposal.permissionsRequested} ${proposal.protectedPathsFlagged}"
+        )
+
+        _devState.value = _devState.value.copy(activeCycleStage = STAGE_RUNNING, statusMessage = "Committing ${changes.size} file(s) to $targetBranch...")
         val commitRes = commitChangesAtomic(
             repoSlug = repo,
             token = token,
@@ -236,12 +380,20 @@ class GitHubAutoDevEngine @Inject constructor(
             val err = commitRes.exceptionOrNull()?.message ?: "Commit failed"
             val updated = proposal.copy(status = "FAILED", lastErrorReport = err, updatedAt = System.currentTimeMillis())
             upgradeDao.upsertProposal(updated)
-            _devState.value = _devState.value.copy(running = false, activeCycleStage = "ERROR", statusMessage = err)
+            recordError("AUTO_DEV", "Commit failed", err)
+            _devState.value = _devState.value.copy(running = false, activeCycleStage = STAGE_FAILED, statusMessage = err)
             return@withContext Result.failure(commitRes.exceptionOrNull()!!)
         }
 
         val commitSha = commitRes.getOrThrow()
-        _devState.value = _devState.value.copy(activeCycleStage = "REVIEW", statusMessage = "Opening Pull Request $targetBranch -> $baseBranch...")
+        _devState.value = _devState.value.copy(activeCycleStage = STAGE_RUNNING, statusMessage = "Opening Pull Request $targetBranch -> $baseBranch...")
+
+        val protectedSection = if (detectedProtected.isNotEmpty() || proposal.protectedPathsFlagged.isNotBlank()) {
+            val allFlags = (detectedProtected + proposal.protectedPathsFlagged.split(",").map { it.trim() }).filter { it.isNotBlank() }.distinct()
+            "\n> [!WARNING]\n> **PROTECTED PATHS / CONFIGS FLAGGED (Manual Review Required):** ${allFlags.joinToString(", ")}\n"
+        } else {
+            ""
+        }
 
         val prRes = openPullRequest(
             repoSlug = repo,
@@ -252,11 +404,12 @@ class GitHubAutoDevEngine @Inject constructor(
             body = """
                 ## Autonomous Integration Proposal
                 - **Source**: `${proposal.toolIdentifier}`
+                - **Fit Score**: `${proposal.fitScore}/10`
                 - **Risk Level**: `${proposal.riskLevel}`
                 - **Permissions Requested**: `${proposal.permissionsRequested.ifBlank { "None" }}`
                 - **Commit SHA**: `$commitSha`
-
-                ### Integration Plan
+                $protectedSection
+                ### Integration Plan & Changelog
                 ${proposal.integrationPlan}
             """.trimIndent()
         )
@@ -270,13 +423,14 @@ class GitHubAutoDevEngine @Inject constructor(
             commitSha = commitSha,
             prNumber = prNumber ?: proposal.prNumber,
             prUrl = prUrl.ifBlank { proposal.prUrl },
+            protectedPathsFlagged = if (detectedProtected.isNotEmpty()) detectedProtected.joinToString(", ") else proposal.protectedPathsFlagged,
             lastErrorReport = "",
             updatedAt = System.currentTimeMillis()
         )
         upgradeDao.upsertProposal(staged)
 
-        // Trigger/Poll GitHub Actions Build
-        _devState.value = _devState.value.copy(activeCycleStage = "BUILD", statusMessage = "Waiting for GitHub Actions build on $targetBranch...")
+        // Poll GitHub Actions CI run
+        _devState.value = _devState.value.copy(activeCycleStage = STAGE_WAITING_CI, statusMessage = "Waiting for CI on $targetBranch...")
         val buildStatus = pollBranchBuild(repo, token, targetBranch, maxPolls = 10)
         _devState.value = _devState.value.copy(lastBuild = buildStatus)
 
@@ -288,31 +442,40 @@ class GitHubAutoDevEngine @Inject constructor(
         upgradeDao.upsertProposal(staged)
 
         if (buildStatus.conclusion == "failure" && settings.autoDevEnabled && !stopRequested) {
-            // Bounded self-repair attempt on failure using LLM diff
-            staged = attemptBuildSelfRepair(repo, token, staged, buildStatus)
+            staged = attemptBuildSelfRepair(repo, token, staged, buildStatus, changes)
         }
 
-        if (staged.lastBuildConclusion == "success" && settings.autoMergeOnGreen && !staged.requiresApproval && prNumber != null) {
+        val hasProtected = staged.protectedPathsFlagged.isNotBlank() || detectedProtected.isNotEmpty()
+        if (staged.lastBuildConclusion == "success" && settings.autoMergeOnGreen && !staged.requiresApproval && !hasProtected && prNumber != null) {
             val mergeRes = mergePullRequest(repo, token, prNumber, staged.title)
             if (mergeRes.isSuccess) {
                 staged = staged.copy(status = "MERGED", updatedAt = System.currentTimeMillis())
                 upgradeDao.upsertProposal(staged)
             }
-        } else if (staged.lastBuildConclusion == "failure" && settings.notifyOnBuildFailure) {
-            onBuildFailureNotify("Build failed on $targetBranch: ${staged.lastErrorReport.take(120)}")
+        } else if (staged.lastBuildConclusion == "failure") {
+            val failSummary = "Build failed after ${staged.retryAttempts} repair attempt(s) on $targetBranch: ${staged.lastErrorReport.take(160)}"
+            recordError("AUTO_DEV", "CI failure on $targetBranch", failSummary)
+            if (settings.notifyOnBuildFailure) {
+                onBuildFailureNotify(failSummary)
+            }
         }
 
+        refreshRealGitHubMetrics(repo, token)
+
+        val finalStage = when {
+            staged.status == "MERGED" -> STAGE_IDLE
+            staged.lastBuildConclusion == "failure" -> STAGE_FAILED
+            staged.lastBuildConclusion == "success" -> STAGE_WAITING_APPROVAL
+            else -> STAGE_WAITING_CI
+        }
         _devState.value = _devState.value.copy(
             running = false,
-            activeCycleStage = if (staged.lastBuildConclusion == "success") "NOTIFY" else staged.lastBuildConclusion.uppercase().ifBlank { "STAGED" },
+            activeCycleStage = finalStage,
             statusMessage = "Branch $targetBranch -> ${staged.status} (CI: ${staged.lastBuildConclusion.ifBlank { "queued" }})"
         )
         Result.success(staged)
     }
 
-    /**
-     * Triggers an immediate manual commit on staging branch or workflow_dispatch build in GitHub Actions.
-     */
     suspend fun triggerGitHubActionsBuild(branchOverride: String? = null): Result<String> = withContext(Dispatchers.IO) {
         val settings = prefs.settings.first()
         val token = crypto.getSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN).trim()
@@ -323,7 +486,7 @@ class GitHubAutoDevEngine @Inject constructor(
             return@withContext Result.failure(IllegalStateException("Configure GitHub token and repository first."))
         }
 
-        val workflows = listOf("android-build.yml", "build.yml")
+        val workflows = listOf("release.yml", "android-build.yml", "build.yml")
         var lastErr = "No dispatchable workflow found"
         for (wf in workflows) {
             val body = JSONObject().put("ref", ref).toString()
@@ -335,13 +498,14 @@ class GitHubAutoDevEngine @Inject constructor(
             )
             if (res.isSuccess) {
                 logRun("BUILD_DISPATCH", ref, 204, "Triggered $wf on $ref", "", true)
-                _devState.value = _devState.value.copy(activeCycleStage = "BUILD", currentBranch = ref, statusMessage = "Triggered $wf on $ref")
+                _devState.value = _devState.value.copy(activeCycleStage = STAGE_WAITING_CI, currentBranch = ref, statusMessage = "Triggered $wf on $ref")
                 return@withContext Result.success("Triggered $wf on branch '$ref'.")
             } else {
                 lastErr = res.exceptionOrNull()?.message ?: lastErr
             }
         }
         logRun("BUILD_DISPATCH", ref, 404, "Build trigger failed", lastErr, false)
+        recordError("AUTO_DEV", "Workflow dispatch failed", lastErr)
         Result.failure(IllegalStateException("Unable to trigger workflow build: $lastErr"))
     }
 
@@ -354,11 +518,79 @@ class GitHubAutoDevEngine @Inject constructor(
         }
         val status = pollBranchBuild(repo, token, branch ?: settings.githubBaseBranch, maxPolls = 1)
         _devState.value = _devState.value.copy(lastBuild = status)
+        refreshRealGitHubMetrics(repo, token)
         Result.success(status)
     }
 
     /**
-     * Rollback a feature branch (e.g. zehn-auto or proposal branch) back to base branch / last known good SHA.
+     * Safe monotonic rollback: opens a Rollback PR on zehn-auto/rollback-... targeting baseBranch
+     * so GitHub Actions builds the restored previous state under a NEW higher versionCode
+     * (never attempting to install an older versionCode).
+     */
+    suspend fun createRollbackPrForPreviousVersion(
+        targetReleaseTag: String = "",
+        previousCommitSha: String = ""
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val settings = prefs.settings.first()
+        val token = crypto.getSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN).trim()
+        val repo = settings.githubRepoSlug.trim()
+        val baseBranch = settings.githubBaseBranch.ifBlank { "main" }
+
+        if (token.isBlank() || !repo.contains('/')) {
+            return@withContext Result.failure(IllegalStateException("Configure GitHub token & owner/repo to create a Rollback PR."))
+        }
+
+        val safeTag = targetReleaseTag.ifBlank { settings.lastGoodTagOrVersion }.replace(Regex("[^A-Za-z0-9._-]"), "-")
+        val rollbackBranch = "zehn-auto/rollback-$safeTag-${System.currentTimeMillis() % 10000}"
+
+        val branchRes = createOrUpdateBranch(repo, token, rollbackBranch, baseBranch)
+        if (branchRes.isFailure) return@withContext Result.failure(branchRes.exceptionOrNull()!!)
+
+        val shaHint = previousCommitSha.ifBlank { settings.lastGoodCommitSha }.ifBlank { "previous release tag $safeTag" }
+        val rollbackMarker = CommitFileChange(
+            path = "docs/rollbacks/ROLLBACK_${safeTag}.md",
+            content = """
+                # Monotonic Rollback Release Request
+                - Requested Target State: `$safeTag` (`$shaHint`)
+                - Triggered from Installed App: `v${BuildConfig.VERSION_NAME}` (`versionCode=${BuildConfig.VERSION_CODE}`)
+                - Note: Android prohibits installing lower `versionCode`. Merging this PR triggers `release.yml` to publish a **new higher versionCode** containing the verified rollback source.
+            """.trimIndent()
+        )
+        val commitRes = commitChangesAtomic(
+            repoSlug = repo,
+            token = token,
+            branch = rollbackBranch,
+            changes = listOf(rollbackMarker),
+            commitMessage = "revert(release): stage monotonic rollback PR toward $safeTag"
+        )
+        if (commitRes.isFailure) return@withContext Result.failure(commitRes.exceptionOrNull()!!)
+
+        val prRes = openPullRequest(
+            repoSlug = repo,
+            token = token,
+            headBranch = rollbackBranch,
+            baseBranch = baseBranch,
+            title = "[Zehn Auto-Dev] Rollback PR toward $safeTag (higher versionCode)",
+            body = """
+                ## Monotonic Rollback Release
+                - **Target State**: `$safeTag` (`$shaHint`)
+                - **Commit**: `${commitRes.getOrThrow()}`
+                - **Notice**: Merging this PR into `$baseBranch` publishes a new GitHub Release with `versionCode = GITHUB_RUN_NUMBER` (strictly higher than current `${BuildConfig.VERSION_CODE}`).
+            """.trimIndent()
+        )
+        prRes.map { (prNum, url) ->
+            _devState.value = _devState.value.copy(
+                activeCycleStage = STAGE_WAITING_APPROVAL,
+                currentBranch = rollbackBranch,
+                statusMessage = "Rollback PR #$prNum ready for your Merge approval."
+            )
+            refreshRealGitHubMetrics(repo, token)
+            "Opened Rollback PR #$prNum ($rollbackBranch -> $baseBranch): $url"
+        }
+    }
+
+    /**
+     * Legacy branch reset helper kept intact for existing Auto-Dev tests.
      */
     suspend fun rollbackBranchToStable(branchToReset: String? = null): Result<String> = withContext(Dispatchers.IO) {
         val settings = prefs.settings.first()
@@ -388,7 +620,7 @@ class GitHubAutoDevEngine @Inject constructor(
                 logRun("ROLLBACK", targetBranch, code, "Rolled back $targetBranch to ${stableSha.take(7)}", "", true)
                 _devState.value = _devState.value.copy(
                     running = false,
-                    activeCycleStage = "ROLLED_BACK",
+                    activeCycleStage = STAGE_IDLE,
                     statusMessage = "Restored '$targetBranch' to stable SHA ${stableSha.take(7)}."
                 )
                 Result.success("Restored '$targetBranch' to stable commit ${stableSha.take(7)}.")
@@ -399,6 +631,101 @@ class GitHubAutoDevEngine @Inject constructor(
                 Result.failure(IllegalStateException(msg))
             }
         )
+    }
+
+    /**
+     * Crash Guard: creates a GitHub Issue on the configured repository with sanitized crash details.
+     */
+    suspend fun createGitHubIssueForCrash(title: String, sanitizedCrashLog: String): Result<String> = withContext(Dispatchers.IO) {
+        val settings = prefs.settings.first()
+        val token = crypto.getSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN).trim()
+        val repo = settings.githubRepoSlug.trim()
+        if (token.isBlank() || !repo.contains('/')) {
+            return@withContext Result.failure(IllegalStateException("Configure GitHub token & 'owner/repo' first to file an Issue."))
+        }
+
+        val cleanTitle = "[Safe Mode Crash] ${title.take(100)} (v${BuildConfig.VERSION_NAME})"
+        val cleanBody = buildString {
+            appendLine("## Zehn AI Safe Mode Crash Report")
+            appendLine("- **Version**: `${BuildConfig.VERSION_NAME}` (`versionCode=${BuildConfig.VERSION_CODE}`)")
+            appendLine("- **Guard**: Triggered after repeated crashes within 5 minutes.")
+            appendLine()
+            appendLine("### Sanitized Stack Trace")
+            appendLine("```")
+            appendLine(CloudLlmClient.sanitizeError(sanitizedCrashLog).take(6000))
+            appendLine("```")
+        }
+        val reqBody = JSONObject()
+            .put("title", cleanTitle)
+            .put("body", cleanBody)
+            .put("labels", JSONArray().put("bug").put("safe-mode"))
+            .toString()
+
+        val res = executeGitHubRequest("POST", "https://api.github.com/repos/$repo/issues", token, reqBody)
+        res.mapCatching { (code, payload) ->
+            val obj = JSONObject(payload)
+            val num = obj.optInt("number", 0)
+            val htmlUrl = obj.optString("html_url", "")
+            logRun("ISSUE", repo, code, "Opened Crash Issue #$num", htmlUrl, true)
+            "Created GitHub Issue #$num: $htmlUrl"
+        }.onFailure { err ->
+            val msg = CloudLlmClient.sanitizeError(err.message ?: "Failed to create issue")
+            logRun("ISSUE", repo, 500, "Failed to create Crash Issue", msg, false)
+            recordError("SAFE_MODE", "Issue creation failed", msg)
+        }
+    }
+
+    /**
+     * Crash Guard: creates an Auto-Dev crash-fix proposal (and stages if token & Auto-Dev allow).
+     */
+    suspend fun createCrashFixAutoDevTask(sanitizedCrashLog: String): Result<UpgradeProposalEntity> = withContext(Dispatchers.IO) {
+        val cleanTrace = CloudLlmClient.sanitizeError(sanitizedCrashLog).take(3500)
+        val diagPrompt = """
+            Analyze this Android crash stack trace from Zehn AI and produce a concise, concrete fix plan and Kotlin guard snippet:
+            $cleanTrace
+        """.trimIndent()
+        val diagnosis = runCatching {
+            aiRouter.routeAndStream(emptyList(), diagPrompt, null).toList().joinToString("") { it.delta }
+        }.getOrDefault("Add defensive null/try-catch guard around failing component.")
+
+        val fixReportPath = "docs/crash_fixes/SAFE_MODE_FIX_${BuildConfig.VERSION_CODE}_${System.currentTimeMillis()}.md"
+        val fixContent = """
+            # Automated Safe-Mode Crash Fix Proposal
+            - App Version: ${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})
+
+            ## Crash Trace
+            ```
+            $cleanTrace
+            ```
+
+            ## LLM Root-Cause Diagnosis & Patch Guide
+            ${CloudLlmClient.sanitizeError(diagnosis).ifBlank { "Investigate top stack frame & isolate failing subsystem." }}
+        """.trimIndent()
+
+        val filesJson = JSONArray().put(
+            JSONObject().put("path", fixReportPath).put("content", fixContent)
+        ).toString()
+
+        val proposal = UpgradeProposalEntity(
+            toolIdentifier = "crash-guard/v${BuildConfig.VERSION_CODE}-${System.currentTimeMillis() % 10000}",
+            title = "Crash Guard Fix for v${BuildConfig.VERSION_NAME}",
+            summary = "Automated Safe-Mode crash analysis & fix staging task",
+            integrationPlan = diagnosis.take(1200).ifBlank { "Stage Safe-Mode fix branch and run CI." },
+            proposedFilesJson = filesJson,
+            permissionsRequested = "",
+            riskLevel = "LOW",
+            requiresApproval = true,
+            status = "APPROVED",
+            branchName = "zehn-auto/crash-fix-${System.currentTimeMillis() % 10000}",
+            fitScore = 9.0
+        )
+        val id = upgradeDao.upsertProposal(proposal)
+        val settings = prefs.settings.first()
+        val saved = upgradeDao.getProposalById(id) ?: proposal.copy(id = id)
+        if (!settings.allAutoUpgradesPaused && crypto.getSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN).isNotBlank() && settings.githubRepoSlug.contains('/')) {
+            return@withContext executeIntegrationProposal(id)
+        }
+        Result.success(saved)
     }
 
     internal suspend fun createOrUpdateBranch(
@@ -592,42 +919,50 @@ class GitHubAutoDevEngine @Inject constructor(
         repoSlug: String,
         token: String,
         proposal: UpgradeProposalEntity,
-        failedBuild: WorkflowBuildStatus
+        failedBuild: WorkflowBuildStatus,
+        originalChanges: List<CommitFileChange>
     ): UpgradeProposalEntity {
         var current = proposal
         var attempt = 1
-        while (attempt <= 5 && !stopRequested && current.lastBuildConclusion == "failure") {
+        while (attempt <= MAX_REPAIR_ATTEMPTS && !stopRequested && current.lastBuildConclusion == "failure") {
             _devState.value = _devState.value.copy(
-                activeCycleStage = "SELF_REPAIR ($attempt/5)",
-                statusMessage = "Analyzing failed CI log with AI brain (attempt $attempt/5)..."
+                activeCycleStage = STAGE_RUNNING,
+                statusMessage = "Self-repair attempt $attempt/$MAX_REPAIR_ATTEMPTS on ${current.branchName}..."
             )
+            val filesList = originalChanges.joinToString("\n") { "--- ${it.path} ---\n${it.content.take(1200)}" }
             val prompt = """
                 A GitHub Actions Android Gradle build failed on branch '${current.branchName}'.
-                Propose a minimal safe Kotlin fix comment or patch note as JSON:
-                {"path":"app/src/main/java/com/zehn/assistant/upgrade/adapters/BuildFixNote_${current.id}.md","content":"..."}
-                Build log tail:
-                ${failedBuild.failedLogTail.take(2500)}
+                Inspect the last ~200 log lines and changed files, and output either a JSON object {"path":"...","content":"..."} or explanation:
+                Changed files:
+                $filesList
+
+                Failed CI log tail (~200 lines):
+                ${failedBuild.failedLogTail.take(2800)}
             """.trimIndent()
-            val reply = aiRouter.routeAndStream(emptyList(), prompt, null).toList()
-                .joinToString("") { it.delta }
+            val reply = runCatching {
+                aiRouter.routeAndStream(emptyList(), prompt, null).toList().joinToString("") { it.delta }
+            }.getOrDefault("")
 
             if (reply.isBlank()) break
 
-            val fixNote = CommitFileChange(
+            val candidateFile = extractCommitFileFromLlmReply(reply) ?: CommitFileChange(
                 path = "docs/auto_dev_repair_${current.id}_attempt_$attempt.md",
                 content = "# Auto-Dev Repair Analysis Attempt $attempt\n\n```\n${CloudLlmClient.sanitizeError(failedBuild.failedLogTail.take(1500))}\n```\n\n## AI Diagnosis\n${CloudLlmClient.sanitizeError(reply.take(2500))}\n"
             )
-            val scan = safetyAnalyzer.scanCommitDiff(listOf(fixNote), allowWorkflowEdits = false)
+            val scan = safetyAnalyzer.scanCommitDiff(listOf(candidateFile), allowWorkflowEdits = false)
             if (!scan.clean) break
 
-            val commitRes = commitChangesAtomic(repoSlug, token, current.branchName, listOf(fixNote), "chore(auto-dev): diagnostics pass #$attempt")
+            val commitRes = commitChangesAtomic(repoSlug, token, current.branchName, listOf(candidateFile), "fix(auto-dev): CI self-repair attempt #$attempt")
             if (commitRes.isFailure) break
 
             val nextBuild = pollBranchBuild(repoSlug, token, current.branchName, maxPolls = 4)
+            logRun("SELF_REPAIR", current.branchName, if (nextBuild.conclusion == "success") 200 else 500, "Repair attempt #$attempt -> ${nextBuild.conclusion}", "", nextBuild.conclusion == "success")
+
             current = current.copy(
                 commitSha = commitRes.getOrThrow(),
                 lastBuildConclusion = nextBuild.conclusion.ifBlank { nextBuild.status },
                 lastErrorReport = nextBuild.failedLogTail,
+                retryAttempts = attempt,
                 updatedAt = System.currentTimeMillis()
             )
             upgradeDao.upsertProposal(current)
@@ -635,6 +970,22 @@ class GitHubAutoDevEngine @Inject constructor(
             attempt++
         }
         return current
+    }
+
+    private fun extractCommitFileFromLlmReply(raw: String): CommitFileChange? {
+        return runCatching {
+            val start = raw.indexOf('{')
+            val end = raw.lastIndexOf('}')
+            if (start < 0 || end <= start) return null
+            val obj = JSONObject(raw.substring(start, end + 1))
+            val path = obj.optString("path", "").trim()
+            val content = obj.optString("content", "")
+            if (path.isNotBlank() && content.isNotBlank() && !path.startsWith(".github/workflows")) {
+                CommitFileChange(path, content)
+            } else {
+                null
+            }
+        }.getOrNull()
     }
 
     private fun parseProposedChanges(proposal: UpgradeProposalEntity): List<CommitFileChange> {
@@ -681,6 +1032,18 @@ class GitHubAutoDevEngine @Inject constructor(
         )
     }
 
+    private suspend fun recordError(source: String, message: String, detail: String = "") {
+        runCatching {
+            upgradeDao.insertErrorLog(
+                UpgradeErrorLogEntity(
+                    source = source,
+                    message = CloudLlmClient.sanitizeError(message).take(240),
+                    detail = CloudLlmClient.sanitizeError(detail).take(1200)
+                )
+            )
+        }
+    }
+
     private suspend fun executeGitHubRequest(
         method: String,
         url: String,
@@ -694,22 +1057,27 @@ class GitHubAutoDevEngine @Inject constructor(
                 .url(url)
                 .addHeader("Accept", "application/vnd.github+json")
                 .addHeader("X-GitHub-Api-Version", "2022-11-28")
-                .addHeader("User-Agent", "ZehnAI-AutoDev/4.0")
+                .addHeader("User-Agent", "ZehnAI-AutoDev/4.2")
                 .addHeader("Authorization", "Bearer $token")
                 .method(method, jsonBody?.toRequestBody(media))
                 .build()
 
             val exec = runCatching {
                 okHttpClient.newCall(req).execute().use { resp ->
-                    resp.code to resp.body?.string().orEmpty()
+                    val retryAfter = resp.header("Retry-After")?.toLongOrNull()
+                    val resetEpoch = resp.header("X-RateLimit-Reset")?.toLongOrNull()
+                    val waitMs = computeRateLimitWaitMs(retryAfter, resetEpoch, backoffMs)
+                    Triple(resp.code, waitMs, resp.body?.string().orEmpty())
                 }
             }
             exec.onFailure { err ->
                 if (attempt == 2) return Result.failure(err)
-            }.onSuccess { (code, body) ->
+                delay(backoffMs)
+                backoffMs *= 2
+            }.onSuccess { (code, waitMs, body) ->
                 if (code in 200..299) return Result.success(code to body)
-                if ((code == 403 || code == 429) && attempt < 2 && body.contains("rate limit", ignoreCase = true)) {
-                    delay(backoffMs)
+                if ((code == 403 || code == 429) && attempt < 2) {
+                    delay(waitMs)
                     backoffMs *= 2
                 } else {
                     val snippet = CloudLlmClient.sanitizeError(body.take(240))
@@ -718,5 +1086,27 @@ class GitHubAutoDevEngine @Inject constructor(
             }
         }
         return Result.failure(IllegalStateException("GitHub API failed after retries"))
+    }
+
+    internal fun computeRateLimitWaitMs(retryAfterSec: Long?, resetEpochSec: Long?, defaultMs: Long): Long {
+        if (retryAfterSec != null && retryAfterSec > 0) {
+            return (retryAfterSec * 1000L).coerceIn(500L, 15_000L)
+        }
+        if (resetEpochSec != null) {
+            val delta = resetEpochSec * 1000L - System.currentTimeMillis()
+            if (delta in 1..15_000L) return delta
+        }
+        return defaultMs.coerceIn(500L, 15_000L)
+    }
+
+    companion object {
+        const val STAGE_IDLE = "Idle"
+        const val STAGE_RUNNING = "Running"
+        const val STAGE_WAITING_CI = "Waiting for CI"
+        const val STAGE_WAITING_APPROVAL = "Waiting for approval"
+        const val STAGE_FAILED = "Failed"
+
+        const val MAX_OPEN_AUTO_DEV_PRS = 2
+        const val MAX_REPAIR_ATTEMPTS = 5
     }
 }

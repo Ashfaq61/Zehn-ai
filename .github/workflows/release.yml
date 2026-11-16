@@ -1,0 +1,129 @@
+name: Zehn AI Release Builder
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Signed Release APK & Publish GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Accept Android SDK licenses
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
+      - name: Set up Gradle (wrapper-independent)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Restore fixed debug signing keystore
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
+            echo "$DEBUG_KEYSTORE_BASE64" | base64 --decode > debug.keystore
+          elif [ -f debug.keystore.base64 ]; then
+            base64 --decode debug.keystore.base64 > debug.keystore
+          else
+            echo "ERROR: Fixed debug.keystore.base64 or DEBUG_KEYSTORE_BASE64 secret is missing. Refusing to regenerate signing certificate."
+            exit 1
+          fi
+
+      - name: Compute Monotonic Release Version
+        id: ver
+        run: |
+          RUN_CODE="${GITHUB_RUN_NUMBER}"
+          VER_NAME="4.0.${RUN_CODE}"
+          TAG_NAME="v${VER_NAME}"
+          echo "version_code=${RUN_CODE}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${VER_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Unit Tests & Assemble Release-Tagged APK
+        run: |
+          gradle testDebugUnitTest assembleDebug \
+            -PZEHN_VERSION_CODE=${{ steps.ver.outputs.version_code }} \
+            -PZEHN_VERSION_NAME=${{ steps.ver.outputs.version_name }} \
+            --stacktrace | tee gradle-release.log
+
+      - name: Verify Package Name, Rename APK & Compute SHA-256
+        id: artifact
+        run: |
+          RAW_APK=$(find app/build/outputs/apk/debug -maxdepth 1 -name "*.apk" | head -n 1)
+          if [ -z "$RAW_APK" ] || [ ! -s "$RAW_APK" ]; then
+            echo "Built APK is missing or empty."
+            exit 1
+          fi
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -n 1)
+          if [ -n "$AAPT2" ]; then
+            BADGING=$("$AAPT2" dump badging "$RAW_APK" | head -n 2)
+            echo "$BADGING"
+            echo "$BADGING" | grep -q "name='com.zehn.assistant'"
+          fi
+          OUT_APK="zehn-ai-${{ steps.ver.outputs.tag_name }}.apk"
+          cp "$RAW_APK" "$OUT_APK"
+          sha256sum "$OUT_APK" | tee "${OUT_APK}.sha256"
+          SHA_HEX=$(awk '{print $1}' "${OUT_APK}.sha256")
+          echo "apk_file=${OUT_APK}" >> "$GITHUB_OUTPUT"
+          echo "sha_file=${OUT_APK}.sha256" >> "$GITHUB_OUTPUT"
+          echo "sha256=${SHA_HEX}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Changelog from Merged PR Titles
+        id: notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "## Zehn AI ${{ steps.ver.outputs.tag_name }}"
+            echo ""
+            echo "- versionCode: ${{ steps.ver.outputs.version_code }}"
+            echo "- versionName: ${{ steps.ver.outputs.version_name }}"
+            echo "- sha256: ${{ steps.artifact.outputs.sha256 }}"
+            echo ""
+            echo "### Merged Changes"
+          } > release_notes.md
+
+          curl -sSL -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=10" \
+            | python3 -c '
+          import json, sys
+          try:
+              prs = json.load(sys.stdin)
+              lines = []
+              for pr in prs:
+                  if pr.get("merged_at"):
+                      lines.append(f"- PR #{pr.get(\"number\")}: {pr.get(\"title\", \"\").strip()}")
+              print("\n".join(lines) if lines else "- Direct commit / maintenance release on main")
+          except Exception:
+              print("- Verified build on main")
+          ' >> release_notes.md
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag_name }}
+          name: Zehn AI ${{ steps.ver.outputs.tag_name }}
+          body_path: release_notes.md
+          overwrite_files: false
+          files: |
+            ${{ steps.artifact.outputs.apk_file }}
+            ${{ steps.artifact.outputs.sha_file }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

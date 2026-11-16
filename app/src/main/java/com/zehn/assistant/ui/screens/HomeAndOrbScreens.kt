@@ -32,7 +32,9 @@ import androidx.compose.material.icons.filled.FlashlightOn
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PauseCircle
 import androidx.compose.material.icons.filled.PhoneInTalk
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Stop
@@ -121,6 +123,45 @@ fun HomeScreen(
                     emergencyStopped = policy.emergencyStopped,
                     onToggleStop = { vm.toggleEmergencyStop() }
                 )
+            }
+        }
+
+        // Emergency Auto-Upgrade Pause Control directly on Main Screen
+        item {
+            ClayGlassCard(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(
+                            text = if (settings.allAutoUpgradesPaused) {
+                                "Auto-Upgrades PAUSED"
+                            } else {
+                                "Self-Upgrade Engine Active"
+                            },
+                            style = MaterialTheme.typography.titleSmall,
+                            color = if (settings.allAutoUpgradesPaused) ZehnColors.Amber else ZehnColors.Emerald
+                        )
+                        Text(
+                            text = if (settings.allAutoUpgradesPaused) {
+                                "Background discovery, Auto-Dev & updater suspended."
+                            } else {
+                                "Channel: ${settings.releaseChannel} • Discovery: ${settings.researchScheduleMode}"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = ZehnColors.SlateMuted
+                        )
+                    }
+                    ClayActionButton(
+                        text = if (settings.allAutoUpgradesPaused) "Resume Upgrades" else "Pause Auto-Upgrades",
+                        icon = if (settings.allAutoUpgradesPaused) Icons.Filled.PlayArrow else Icons.Filled.PauseCircle,
+                        isDanger = !settings.allAutoUpgradesPaused,
+                        modifier = Modifier.testTag("main_pause_auto_upgrades_button"),
+                        onClick = { vm.togglePauseAllAutoUpgrades() }
+                    )
+                }
             }
         }
 

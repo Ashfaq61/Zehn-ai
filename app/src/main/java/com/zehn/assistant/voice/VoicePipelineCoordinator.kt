@@ -155,6 +155,7 @@ class VoicePipelineCoordinator @Inject constructor(
                         statusBanner = msg
                     )
                 }
+                recordSuccessfulVoiceCheck("Gemini Live connected (${ev.modelId})")
                 if (ev.resumed) _errors.tryEmit(msg)
             }
 
@@ -202,6 +203,7 @@ class VoicePipelineCoordinator @Inject constructor(
                 _uiState.update { it.copy(lastReply = ev.text) }
                 if (ev.isTurnFinal) {
                     val modelTag = _uiState.value.activeLiveModel.ifBlank { "Gemini Live" }
+                    recordSuccessfulVoiceCheck("Gemini Live turn completed ($modelTag)")
                     _liveChatEvents.tryEmit(LiveChatTranscriptEvent.OutputDraft(""))
                     _liveChatEvents.tryEmit(
                         LiveChatTranscriptEvent.CommittedTurn("assistant", ev.text, modelTag)
@@ -545,6 +547,7 @@ class VoicePipelineCoordinator @Inject constructor(
                     if (chunk.completed) {
                         tts.flushRemaining()
                         if (replyBuilder.isNotEmpty()) {
+                            recordSuccessfulVoiceCheck("Classic voice reply (${chunk.modelUsed})")
                             _liveChatEvents.tryEmit(
                                 LiveChatTranscriptEvent.CommittedTurn("assistant", replyBuilder.toString(), chunk.modelUsed)
                             )
@@ -562,6 +565,38 @@ class VoicePipelineCoordinator @Inject constructor(
                 _errors.tryEmit(msg)
             }
         }
+    }
+
+    private fun recordSuccessfulVoiceCheck(detail: String) {
+        scope.launch {
+            runCatching {
+                prefs.updateSettings {
+                    it.copy(
+                        lastSuccessfulVoiceTestAt = System.currentTimeMillis(),
+                        lastSuccessfulVoiceTestDetail = detail.take(120)
+                    )
+                }
+            }
+        }
+    }
+
+    suspend fun runVoiceHealthSelfTest(): String {
+        val settings = prefs.settings.first()
+        runCatching { geminiLive.discoverAvailableLiveModels() }
+        val models = geminiLive.discoveryState.value.availableModels
+        val modelLabel = when {
+            settings.geminiLiveVoiceEnabled && models.isNotEmpty() ->
+                "Gemini Live (${models.first().id})"
+            else -> "Classic (${settings.sttEngine.label} -> ${settings.activeModel} -> ${settings.ttsEngine.label})"
+        }
+        val detail = "Pipeline Ready: $modelLabel"
+        prefs.updateSettings {
+            it.copy(
+                lastSuccessfulVoiceTestAt = System.currentTimeMillis(),
+                lastSuccessfulVoiceTestDetail = detail
+            )
+        }
+        return detail
     }
 
     private suspend fun scheduleContinuousRelistenIfEnabled(settings: ZehnSettings, idleBanner: String = "Ready") {

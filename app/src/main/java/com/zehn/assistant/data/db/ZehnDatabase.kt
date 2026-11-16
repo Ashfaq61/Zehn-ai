@@ -24,9 +24,10 @@ import kotlinx.coroutines.launch
         DiscoveredToolEntity::class,
         UpgradeProposalEntity::class,
         AutoDevRunEntity::class,
-        ReleaseRecordEntity::class
+        ReleaseRecordEntity::class,
+        UpgradeErrorLogEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class ZehnDatabase : RoomDatabase() {
@@ -138,6 +139,39 @@ abstract class ZehnDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE discovered_tools ADD COLUMN fitScore REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE discovered_tools ADD COLUMN statusTag TEXT NOT NULL DEFAULT 'Suggested'")
+                db.execSQL("ALTER TABLE discovered_tools ADD COLUMN implementationPlan TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE discovered_tools ADD COLUMN hasModelCard INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE discovered_tools ADD COLUMN activelyMaintained INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE discovered_tools ADD COLUMN rejectionReason TEXT NOT NULL DEFAULT ''")
+
+                db.execSQL("ALTER TABLE upgrade_proposals ADD COLUMN fitScore REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE upgrade_proposals ADD COLUMN protectedPathsFlagged TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE upgrade_proposals ADD COLUMN retryAttempts INTEGER NOT NULL DEFAULT 0")
+
+                db.execSQL("ALTER TABLE release_history ADD COLUMN isPrerelease INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE release_history ADD COLUMN verifiedSha256 INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE release_history ADD COLUMN verifiedSigningCert INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE release_history ADD COLUMN installedFromApp INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE release_history ADD COLUMN installedAt INTEGER NOT NULL DEFAULT 0")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS upgrade_error_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        source TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        detail TEXT NOT NULL,
+                        timestamp INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun build(context: Context): ZehnDatabase {
             lateinit var db: ZehnDatabase
             db = Room.databaseBuilder(
@@ -145,7 +179,7 @@ abstract class ZehnDatabase : RoomDatabase() {
                 ZehnDatabase::class.java,
                 "zehn_assistant.db"
             )
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .addCallback(object : Callback() {
                     override fun onCreate(supportDb: SupportSQLiteDatabase) {
                         super.onCreate(supportDb)

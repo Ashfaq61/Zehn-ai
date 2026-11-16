@@ -42,15 +42,21 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -162,6 +168,10 @@ fun ZehnRootApp(
     val pendingConfirm by vm.pendingConfirmation.collectAsStateWithLifecycle()
     val banner by vm.toastBanner.collectAsStateWithLifecycle()
     val crashFileText by vm.crashFileText.collectAsStateWithLifecycle()
+    val safeModeActive by vm.safeModeActive.collectAsStateWithLifecycle()
+    val crashReport by vm.lastCrashReport.collectAsStateWithLifecycle()
+    val safeModeReply by vm.safeModeChatReply.collectAsStateWithLifecycle()
+    val safeModeBusy by vm.safeModeChatBusy.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(banner) {
@@ -209,6 +219,29 @@ fun ZehnRootApp(
     }
 
     CompositionLocalProvider(LocalZehnHapticsEnabled provides settings.hapticFeedbackEnabled) {
+        if (safeModeActive) {
+            val combinedCrashText = listOfNotNull(
+                crashFileText?.takeIf { it.isNotBlank() },
+                crashReport?.sanitizedStackTrace?.takeIf { it.isNotBlank() },
+                crashReport?.sanitizedMessage
+            ).firstOrNull() ?: "Repeated crashes detected within 5 minutes. Services paused."
+
+            SafeModeScreen(
+                crashText = combinedCrashText,
+                crashCount = crashReport?.crashCountInWindow ?: 3,
+                basicChatReply = safeModeReply,
+                basicChatBusy = safeModeBusy,
+                snackbarHostState = snackbarHostState,
+                onSendBasicChat = { vm.sendSafeModeBasicChat(it) },
+                onCreateGitHubIssue = { vm.createSafeModeGitHubIssue() },
+                onTriggerAutoDevFix = { vm.queueSafeModeAutoDevFix() },
+                onRestoreBackup = { vm.restoreLatestPreUpdateBackup() },
+                onClearLogs = { vm.clearCrashLogFile() },
+                onExitSafeMode = { vm.exitSafeMode() }
+            )
+            return@CompositionLocalProvider
+        }
+
         if (!crashFileText.isNullOrBlank()) {
             CrashLogScreen(
                 crashText = crashFileText!!,
@@ -572,6 +605,180 @@ fun CrashLogScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 84.dp, start = 16.dp, end = 16.dp)
+        )
+    }
+}
+
+@Composable
+fun SafeModeScreen(
+    crashText: String,
+    crashCount: Int,
+    basicChatReply: String,
+    basicChatBusy: Boolean,
+    snackbarHostState: SnackbarHostState,
+    onSendBasicChat: (String) -> Unit,
+    onCreateGitHubIssue: () -> Unit,
+    onTriggerAutoDevFix: () -> Unit,
+    onRestoreBackup: () -> Unit,
+    onClearLogs: () -> Unit,
+    onExitSafeMode: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var promptDraft by remember { mutableStateOf("") }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ZehnColors.Background)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            ClayGlassCard(accentGlow = true) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Warning, contentDescription = "Safe mode warning", tint = ZehnColors.RoseStop)
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = "Safe Mode Active ($crashCount crashes in 5 min)",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = ZehnColors.RoseStop
+                        )
+                        Text(
+                            text = "Background discovery, Auto-Dev & Accessibility auto-tasks paused to protect your device.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ZehnColors.SlateMuted
+                        )
+                    }
+                }
+            }
+
+            ClayGlassCard {
+                Text("Recovery Actions", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan)
+                Spacer(Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ClayActionButton(
+                        text = "Create GitHub Issue",
+                        icon = Icons.Filled.BugReport,
+                        modifier = Modifier.weight(1f).testTag("safe_mode_issue_button"),
+                        onClick = onCreateGitHubIssue
+                    )
+                    ClayActionButton(
+                        text = "Auto-Dev Fix",
+                        icon = Icons.Filled.Build,
+                        modifier = Modifier.weight(1f).testTag("safe_mode_autodev_button"),
+                        onClick = onTriggerAutoDevFix
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ClayActionButton(
+                        text = "Restore Backup",
+                        icon = Icons.Filled.Restore,
+                        modifier = Modifier.weight(1f),
+                        onClick = onRestoreBackup
+                    )
+                    ClayActionButton(
+                        text = "Exit Safe Mode",
+                        isDanger = true,
+                        modifier = Modifier.weight(1f).testTag("safe_mode_exit_button"),
+                        onClick = onExitSafeMode
+                    )
+                }
+            }
+
+            ClayGlassCard {
+                Text("Sanitized Crash Log", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Amber)
+                Spacer(Modifier.height(6.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(170.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    SelectionContainer {
+                        Text(
+                            text = crashText,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                lineHeight = 16.sp
+                            ),
+                            color = ZehnColors.FrostWhite
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ClayActionButton(
+                        text = "Copy Log",
+                        icon = Icons.Filled.ContentCopy,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            cm?.setPrimaryClip(ClipData.newPlainText("Zehn Safe Mode Crash", crashText))
+                            scope.launch { snackbarHostState.showSnackbar("Sanitized crash log copied") }
+                        }
+                    )
+                    ClayActionButton(
+                        text = "Clear Log",
+                        icon = Icons.Filled.Delete,
+                        isDanger = true,
+                        modifier = Modifier.weight(1f),
+                        onClick = onClearLogs
+                    )
+                }
+            }
+
+            ClayGlassCard {
+                Text("Basic Safe-Mode Chat", style = MaterialTheme.typography.titleMedium, color = ZehnColors.FrostWhite)
+                Text(
+                    "Direct minimal LLM chat without background workers or device actions.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ZehnColors.SlateMuted
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = promptDraft,
+                        onValueChange = { promptDraft = it },
+                        label = { Text("Ask Zehn in Safe Mode") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(
+                        enabled = !basicChatBusy && promptDraft.isNotBlank(),
+                        onClick = {
+                            val q = promptDraft
+                            promptDraft = ""
+                            onSendBasicChat(q)
+                        }
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send Safe Mode Chat", tint = ZehnColors.Cyan)
+                    }
+                }
+                if (basicChatBusy) {
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = ZehnColors.Cyan)
+                }
+                if (basicChatReply.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(basicChatReply, style = MaterialTheme.typography.bodyMedium, color = ZehnColors.FrostWhite)
+                }
+            }
+        }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 24.dp, start = 16.dp, end = 16.dp)
         )
     }
 }

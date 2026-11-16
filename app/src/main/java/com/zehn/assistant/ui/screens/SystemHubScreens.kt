@@ -178,6 +178,12 @@ fun PermissionsScreen(vm: ZehnViewModel) {
         },
         Triple("Modify System Brightness", Settings.System.canWrite(context)) {
             context.startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:${context.packageName}")))
+        },
+        Triple(
+            "Install Unknown Apps (Self-Updater)",
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.packageManager.canRequestPackageInstalls() else true
+        ) {
+            vm.openUnknownSourcesSettings()
         }
     )
 
@@ -458,7 +464,11 @@ private fun SettingToggle(
 @Composable
 fun UpdateScreen(vm: ZehnViewModel) {
     val onDevice by vm.onDeviceState.collectAsStateWithLifecycle()
+    val settings by vm.settings.collectAsStateWithLifecycle()
     val releases by vm.releaseHistory.collectAsStateWithLifecycle()
+    val dlProgress by vm.apkDownloadProgress.collectAsStateWithLifecycle()
+    val installStatus by vm.installStatus.collectAsStateWithLifecycle()
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 120.dp),
@@ -471,24 +481,37 @@ fun UpdateScreen(vm: ZehnViewModel) {
             ClayGlassCard(accentGlow = true) {
                 Text("Zehn AI v${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE} • com.zehn.assistant)", style = MaterialTheme.typography.titleLarge, color = ZehnColors.Cyan)
                 Spacer(Modifier.height(6.dp))
-                Text("Target SDK 35 • Min SDK 24 • ABIs: ${Build.SUPPORTED_ABIS.joinToString(", ")}", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.FrostWhite)
+                Text("Channel: ${settings.releaseChannel} • Target SDK 35 • ABIs: ${Build.SUPPORTED_ABIS.joinToString(", ")}", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.FrostWhite)
                 Spacer(Modifier.height(6.dp))
                 val runtimeStatus = if (vm.liteRtManager.isNativeRuntimeAvailable()) "Native AAR Loaded" else "Interface Ready (Cloud/Fallback)"
                 Text("LiteRT-LM Runtime: $runtimeStatus • Downloaded offline models: ${onDevice.downloadedModels.size}", style = MaterialTheme.typography.bodyMedium, color = ZehnColors.SlateMuted)
+                if (dlProgress.statusMessage.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(dlProgress.statusMessage, style = MaterialTheme.typography.labelSmall, color = ZehnColors.Emerald)
+                }
+                if (installStatus.state != "IDLE") {
+                    Text("Installer (${installStatus.state}): ${installStatus.message}", style = MaterialTheme.typography.labelSmall, color = ZehnColors.Cyan)
+                }
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     ClayActionButton(text = "Refresh Hardware", modifier = Modifier.weight(1f), onClick = { vm.refreshTelemetry() })
-                    ClayActionButton(text = "Check GitHub Releases", modifier = Modifier.weight(1f), onClick = { vm.checkForApkUpdates() })
+                    ClayActionButton(text = "Check Releases", modifier = Modifier.weight(1f), onClick = { vm.checkForApkUpdates() })
                 }
             }
         }
         items(releases.size) { idx ->
             val rel = releases[idx]
             ClayGlassCard {
-                Text("${rel.tagName} • ${rel.releaseName}", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan)
+                Text("${rel.tagName} (code ${rel.parsedVersionCode ?: "?"}) • ${rel.releaseName}", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan)
                 Text(rel.compatibilityNote, style = MaterialTheme.typography.labelSmall, color = ZehnColors.Emerald)
+                if (rel.sha256.isNotBlank()) {
+                    Text("SHA-256: ${rel.sha256.take(18)}...", style = MaterialTheme.typography.labelSmall, color = ZehnColors.SlateMuted)
+                }
                 Spacer(Modifier.height(6.dp))
-                ClayActionButton(text = "Download Verified APK", onClick = { vm.openReleaseDownload(rel) })
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ClayActionButton(text = "Download & Install", modifier = Modifier.weight(1f), onClick = { vm.downloadAndInstallRelease(rel) })
+                    ClayActionButton(text = "Browser", modifier = Modifier.weight(0.6f), onClick = { vm.openReleaseDownload(rel) })
+                }
             }
         }
     }

@@ -11,6 +11,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.zehn.assistant.data.PreferencesRepository
 import com.zehn.assistant.data.db.UpgradeCenterDao
+import com.zehn.assistant.security.CrashRecoveryManager
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -29,6 +30,7 @@ interface UpgradeWorkerEntryPoint {
     fun autoDevEngine(): GitHubAutoDevEngine
     fun releaseUpdateManager(): ReleaseUpdateManager
     fun upgradeCenterDao(): UpgradeCenterDao
+    fun crashRecoveryManager(): CrashRecoveryManager
 }
 
 class ResearchScheduleWorker(
@@ -38,23 +40,24 @@ class ResearchScheduleWorker(
 
     override suspend fun doWork(): Result {
         val deps = EntryPointAccessors.fromApplication(applicationContext, UpgradeWorkerEntryPoint::class.java)
+        if (deps.crashRecoveryManager().safeModeActive.value) return Result.success()
+
         val prefs = deps.preferencesRepository()
         val settings = prefs.settings.first()
-        if (settings.researchPaused) return Result.success()
+        if (settings.researchPaused || settings.allAutoUpgradesPaused) return Result.success()
 
-        // Step 1: DISCOVER -> ANALYZE -> PLAN
-        deps.researchAgent().runFullResearchCycle(
+        // Step 1: DISCOVER -> PRE-FILTER -> REPORT
+        val summaryRes = deps.researchAgent().runFullResearchCycle(
             includeGitHub = true,
             includeHuggingFace = true
         )
 
-        // Step 2: Optional low-risk staging if Auto-Dev is explicitly enabled
-        if (settings.autoDevEnabled) {
-            val pendingLowRisk = deps.upgradeCenterDao().observeProposals().first()
-                .firstOrNull { !it.requiresApproval && it.riskLevel == "LOW" && it.status == "PENDING" }
-            if (pendingLowRisk != null) {
+        // Step 2: Only stage auto-approved proposals (fitScore >= 8 && autoApproveEnabled && no protected paths && max 2 open PRs)
+        val autoApprovedIds = summaryRes.getOrNull()?.autoApprovedProposalIds.orEmpty()
+        if (settings.autoDevEnabled && settings.autoApproveEnabled && autoApprovedIds.isNotEmpty()) {
+            for (propId in autoApprovedIds.take(2)) {
                 deps.autoDevEngine().executeIntegrationProposal(
-                    proposalId = pendingLowRisk.id,
+                    proposalId = propId,
                     onBuildFailureNotify = { err ->
                         if (settings.notifyOnBuildFailure) {
                             deps.releaseUpdateManager().showBuildFailureNotification(err)
@@ -79,8 +82,9 @@ class ReleaseCheckWorker(
 
     override suspend fun doWork(): Result {
         val deps = EntryPointAccessors.fromApplication(applicationContext, UpgradeWorkerEntryPoint::class.java)
+        if (deps.crashRecoveryManager().safeModeActive.value) return Result.success()
         val settings = deps.preferencesRepository().settings.first()
-        if (!settings.githubRepoSlug.contains('/')) return Result.success()
+        if (settings.allAutoUpgradesPaused || !settings.githubRepoSlug.contains('/')) return Result.success()
         deps.releaseUpdateManager().checkForVerifiedReleaseUpdate(notifyIfNewer = true)
         return Result.success()
     }
@@ -91,7 +95,12 @@ class UpgradeScheduler @Inject constructor(
     @ApplicationContext private val context: Context,
     private val prefs: PreferencesRepository
 ) {
-    suspend fun applySchedule(mode: String, focusMode: String, paused: Boolean) {
+    suspend fun applySchedule(
+        mode: String,
+        focusMode: String,
+        paused: Boolean,
+        wifiOnlyDiscovery: Boolean = true
+    ) {
         val intervalHours = when (mode) {
             "DAILY" -> 24L
             "WEEKLY" -> 24L * 7L
@@ -108,6 +117,7 @@ class UpgradeScheduler @Inject constructor(
                 researchScheduleMode = mode,
                 researchFocusMode = focusMode,
                 researchPaused = paused,
+                discoveryWifiOnly = wifiOnlyDiscovery,
                 nextScheduledResearchTimestamp = nextTs
             )
         }
@@ -117,7 +127,7 @@ class UpgradeScheduler @Inject constructor(
             wm.cancelUniqueWork(WORK_PERIODIC_RESEARCH)
         } else {
             val constraints = Constraints.Builder()
-                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .setRequiredNetworkType(if (wifiOnlyDiscovery) NetworkType.UNMETERED else NetworkType.CONNECTED)
                 .setRequiresBatteryNotLow(true)
                 .build()
             val req = PeriodicWorkRequestBuilder<ResearchScheduleWorker>(intervalHours, TimeUnit.HOURS)
@@ -126,22 +136,29 @@ class UpgradeScheduler @Inject constructor(
             wm.enqueueUniquePeriodicWork(WORK_PERIODIC_RESEARCH, ExistingPeriodicWorkPolicy.UPDATE, req)
         }
 
-        // Periodic verified GitHub Release watcher (every 12 hours when battery is not low)
+        // Periodic verified GitHub Release watcher (every 4 hours when battery is not low)
         val releaseConstraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .setRequiresBatteryNotLow(true)
             .build()
-        val releaseReq = PeriodicWorkRequestBuilder<ReleaseCheckWorker>(12, TimeUnit.HOURS)
+        val releaseReq = PeriodicWorkRequestBuilder<ReleaseCheckWorker>(4, TimeUnit.HOURS)
             .setConstraints(releaseConstraints)
             .build()
-        wm.enqueueUniquePeriodicWork(WORK_PERIODIC_RELEASE, ExistingPeriodicWorkPolicy.KEEP, releaseReq)
+        wm.enqueueUniquePeriodicWork(WORK_PERIODIC_RELEASE, ExistingPeriodicWorkPolicy.UPDATE, releaseReq)
     }
 
-    fun triggerImmediateBackgroundResearch() {
+    suspend fun pauseAllWorkersImmediately() {
+        val wm = WorkManager.getInstance(context)
+        wm.cancelUniqueWork(WORK_PERIODIC_RESEARCH)
+        wm.cancelUniqueWork(WORK_PERIODIC_RELEASE)
+    }
+
+    fun triggerImmediateBackgroundResearch(wifiOnly: Boolean = true) {
         val req = OneTimeWorkRequestBuilder<ResearchScheduleWorker>()
             .setConstraints(
                 Constraints.Builder()
-                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .setRequiredNetworkType(if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
+                    .setRequiresBatteryNotLow(true)
                     .build()
             )
             .build()

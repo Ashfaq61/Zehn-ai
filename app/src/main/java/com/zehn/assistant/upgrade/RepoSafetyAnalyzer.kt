@@ -1,13 +1,16 @@
 package com.zehn.assistant.upgrade
 
 import com.zehn.assistant.data.db.DiscoveredToolEntity
+import java.time.LocalDate
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.roundToInt
 
 data class LicenseEvaluation(
     val normalizedLicense: String,
-    val status: String, // COMPATIBLE, REVIEW, INCOMPATIBLE
+    val status: String, // COMPATIBLE, INCOMPATIBLE
     val note: String
 )
 
@@ -21,6 +24,7 @@ data class IntegrationRiskAssessment(
     val riskLevel: String, // LOW, SENSITIVE, BLOCKED
     val requiresApproval: Boolean,
     val permissionsRequested: List<String>,
+    val protectedPaths: List<String>,
     val summary: String
 )
 
@@ -31,8 +35,9 @@ data class CommitFileChange(
 )
 
 /**
- * Evaluates license compatibility, dependency conflicts, duplicate functionality, security/secret hygiene,
- * Android SDK / RAM / storage / battery fit, and sensitive-change approval gates.
+ * Evaluates license compatibility (strictly rejecting GPL, AGPL, non-commercial, and unknown),
+ * active maintenance, min stars/downloads, Hugging Face model cards, RAM & Android compatibility,
+ * duplicate overlap, 0-10 fit scoring, protected paths, and pre-commit secret/malware hygiene.
  */
 @Singleton
 class RepoSafetyAnalyzer @Inject constructor() {
@@ -50,36 +55,89 @@ class RepoSafetyAnalyzer @Inject constructor() {
         "keystore" to "Built-in AES-256-GCM `KeystoreCryptoManager`"
     )
 
-    private val incompatibleLicenses = setOf("GPL-2.0", "GPL-3.0", "AGPL-3.0", "SSPL-1.0", "WTFPL")
-    private val compatibleLicenses = setOf("MIT", "APACHE-2.0", "BSD-3-CLAUSE", "BSD-2-CLAUSE", "ISC", "UNLICENSE", "0BSD", "CC0-1.0")
+    private val compatibleLicenses = setOf(
+        "MIT", "APACHE-2.0", "BSD-3-CLAUSE", "BSD-2-CLAUSE",
+        "ISC", "UNLICENSE", "0BSD", "CC0-1.0", "MPL-2.0"
+    )
 
     fun evaluateLicense(spdxOrRaw: String, readmeText: String = ""): LicenseEvaluation {
         val raw = spdxOrRaw.trim().uppercase(Locale.US)
         val effective = when {
-            raw.isNotBlank() && raw != "UNKNOWN" && raw != "NOASSERTION" -> raw
+            raw.isNotBlank() && raw != "UNKNOWN" && raw != "NOASSERTION" && raw != "CHECK CARD" -> raw
             readmeText.contains("Apache-2.0", ignoreCase = true) || readmeText.contains("Apache License", ignoreCase = true) -> "APACHE-2.0"
             readmeText.contains("MIT License", ignoreCase = true) -> "MIT"
+            readmeText.contains("BSD-3-Clause", ignoreCase = true) -> "BSD-3-CLAUSE"
+            readmeText.contains("BSD-2-Clause", ignoreCase = true) -> "BSD-2-CLAUSE"
+            readmeText.contains("AGPL", ignoreCase = true) -> "AGPL-3.0"
             readmeText.contains("GPL-3", ignoreCase = true) || readmeText.contains("GNU General Public License", ignoreCase = true) -> "GPL-3.0"
+            readmeText.contains("non-commercial", ignoreCase = true) || readmeText.contains("cc-by-nc", ignoreCase = true) -> "NON-COMMERCIAL"
             else -> "UNKNOWN"
         }
 
+        val isCopyleftOrRestricted =
+            effective.contains("GPL") || // covers GPL-2.0, GPL-3.0, AGPL-3.0
+                effective.contains("AGPL") ||
+                effective.contains("SSPL") ||
+                effective.contains("NON-COMMERCIAL") ||
+                effective.contains("NC") && effective.startsWith("CC-") ||
+                effective.contains("PROPRIETARY") ||
+                effective == "UNKNOWN" ||
+                effective == "NOASSERTION"
+
         return when {
-            effective in compatibleLicenses -> LicenseEvaluation(
+            effective in compatibleLicenses && !isCopyleftOrRestricted -> LicenseEvaluation(
                 effective,
                 "COMPATIBLE",
-                "Permissive open-source license ($effective) safe for modular Android integration."
+                "Permissive commercial-friendly license ($effective)."
             )
-            effective in incompatibleLicenses || effective.contains("GPL") -> LicenseEvaluation(
+            effective.contains("GPL") || effective.contains("AGPL") -> LicenseEvaluation(
                 effective,
                 "INCOMPATIBLE",
-                "Copyleft license ($effective) is incompatible with proprietary/Play distribution without full source disclosure."
+                "Rejected copyleft license ($effective): GPL/AGPL requires full source disclosure."
+            )
+            effective.contains("NON-COMMERCIAL") || (effective.contains("-NC") && effective.startsWith("CC-")) -> LicenseEvaluation(
+                effective,
+                "INCOMPATIBLE",
+                "Rejected non-commercial license ($effective)."
             )
             else -> LicenseEvaluation(
                 effective,
-                "REVIEW",
-                "License '$effective' requires manual verification before code integration."
+                "INCOMPATIBLE",
+                "Rejected unknown or unverified license ('$effective')."
             )
         }
+    }
+
+    fun isActivelyMaintained(lastUpdated: String, referenceDate: LocalDate = LocalDate.now()): Boolean {
+        val datePart = lastUpdated.trim().take(10)
+        if (datePart.isBlank()) return true // Some minimal API payloads omit date; caught by other checks if dead
+        val parsed = runCatching { LocalDate.parse(datePart) }.getOrNull() ?: return true
+        val ageDays = ChronoUnit.DAYS.between(parsed, referenceDate)
+        return ageDays <= 548L // Active within ~18 months
+    }
+
+    fun detectProtectedPaths(paths: List<String>, textHint: String = ""): List<String> {
+        val hits = linkedSetOf<String>()
+        val targets = paths + listOf(textHint)
+        targets.forEach { raw ->
+            val lower = raw.lowercase(Locale.US)
+            if (lower.contains("androidmanifest") || lower.contains("<uses-permission") || lower.contains("uses-permission")) {
+                hits.add("AndroidManifest Permissions")
+            }
+            if (lower.contains("touchguard") || lower.contains("security/") || lower.contains("safetypolicy")) {
+                hits.add("Security & Touch Guard")
+            }
+            if (lower.contains("keystore") || lower.contains("token") || lower.contains("apikey") || lower.contains("api_keys")) {
+                hits.add("Token & Keystore Handling")
+            }
+            if (lower.contains(".github/workflows")) {
+                hits.add("GitHub Actions Workflows")
+            }
+            if (lower.contains("signingconfig") || lower.contains("debug.keystore") || lower.contains("build.gradle")) {
+                hits.add("Signing & Gradle Build Config")
+            }
+        }
+        return hits.toList()
     }
 
     fun scanTextSecurity(content: String, path: String = ""): SecurityScanResult {
@@ -209,13 +267,15 @@ class RepoSafetyAnalyzer @Inject constructor() {
         readmeText: String,
         gradleText: String,
         htmlUrl: String,
-        deviceRamMb: Long
+        deviceRamMb: Long,
+        hasModelCard: Boolean = true
     ): DiscoveredToolEntity {
         val licenseEval = evaluateLicense(rawLicense, readmeText)
         val minSdk = extractMinSdkFromGradle(gradleText)
         val depsSummary = extractDependenciesFromGradleOrReadme(gradleText, readmeText)
         val (isDup, dupReason) = detectDuplicateFunctionality(name, description, depsSummary)
         val secScan = scanTextSecurity("$readmeText\n$gradleText", identifier)
+        val maintained = isActivelyMaintained(lastUpdated)
 
         val estRamMb = estimateRamMb(identifier, description, depsSummary)
         val estStorageMb = estimateStorageMb(identifier, description, source)
@@ -225,10 +285,39 @@ class RepoSafetyAnalyzer @Inject constructor() {
             else -> "Low-Medium"
         }
 
-        // Deliberately multi-factor compatibility scoring — NOT star-only
+        // Strict pre-filter rejections BEFORE generating reports/proposals
+        val rejectionReasons = mutableListOf<String>()
+        if (licenseEval.status != "COMPATIBLE") {
+            rejectionReasons.add(licenseEval.note)
+        }
+        if (source == "GITHUB" && starsOrDownloads < MIN_GITHUB_STARS) {
+            rejectionReasons.add("Below minimum stars ($starsOrDownloads < $MIN_GITHUB_STARS)")
+        }
+        if (source == "HUGGINGFACE" && starsOrDownloads < MIN_HF_DOWNLOADS) {
+            rejectionReasons.add("Below minimum downloads ($starsOrDownloads < $MIN_HF_DOWNLOADS)")
+        }
+        if (source == "HUGGINGFACE" && !hasModelCard) {
+            rejectionReasons.add("Missing model card / documentation (tiny unverified fine-tune rejected)")
+        }
+        if (!maintained) {
+            rejectionReasons.add("Stale or unmaintained (last updated $lastUpdated > 18 months ago)")
+        }
+        if (languageOrPipeline.equals("Swift", true) || languageOrPipeline.equals("Objective-C", true) ||
+            (minSdk != null && minSdk > 35)
+        ) {
+            rejectionReasons.add("Incompatible with Android minSdk/runtime ($languageOrPipeline)")
+        }
+        val effectiveRamCeiling = maxOf((deviceRamMb * 0.70).toLong(), 2048L)
+        if (estRamMb > effectiveRamCeiling) {
+            rejectionReasons.add("Exceeds device RAM fit (~${estRamMb}MB > ~${effectiveRamCeiling}MB limit)")
+        }
+        if (!secScan.clean) {
+            rejectionReasons.add("Security violation: ${secScan.blockingReasons.joinToString("; ")}")
+        }
+
+        // Multi-factor compatibility score (0..100 and 0..10)
         var score = 45
-        if (licenseEval.status == "COMPATIBLE") score += 20
-        else if (licenseEval.status == "INCOMPATIBLE") score -= 35
+        if (licenseEval.status == "COMPATIBLE") score += 20 else score -= 40
 
         if (languageOrPipeline.equals("Kotlin", true) || languageOrPipeline.equals("Java", true) ||
             depsSummary.contains("kotlin", true) || depsSummary.contains("mcp", true) || source == "HUGGINGFACE"
@@ -238,22 +327,46 @@ class RepoSafetyAnalyzer @Inject constructor() {
         if (minSdk == null || minSdk <= 26) score += 8 else if (minSdk > 31) score -= 12
         if (deviceRamMb > 0L && estRamMb > deviceRamMb / 2) score -= 18
         if (isDup) score -= 10
-        if (!secScan.clean) score = 0
         if (starsOrDownloads >= 50) score += 6
+        if (starsOrDownloads >= 300) score += 4
+        if (rejectionReasons.isNotEmpty()) score = score.coerceAtMost(35)
+        if (!secScan.clean) score = 0
 
         val clampedScore = score.coerceIn(0, 100)
+        val fitOutOf10 = ((clampedScore / 10.0) * 10.0).roundToInt() / 10.0
+
         val securitySummary = when {
             !secScan.clean -> "BLOCKED: ${secScan.blockingReasons.joinToString("; ")}"
             secScan.warnings.isNotEmpty() -> "WARNINGS: ${secScan.warnings.joinToString("; ")}"
             else -> "CLEAR"
         }
 
-        val compatNote = buildString {
-            append(licenseEval.note)
-            if (minSdk != null) append(" minSdk=$minSdk.")
-            if (isDup) append(" Duplicate: $dupReason.")
-            if (estRamMb > 0L) append(" Est RAM ~${estRamMb}MB, Storage ~${estStorageMb}MB.")
+        val statusTag = when {
+            rejectionReasons.isNotEmpty() -> "Rejected"
+            fitOutOf10 < 7.0 -> "Suggested"
+            else -> "Pending Approval"
         }
+
+        val implPlan = if (rejectionReasons.isNotEmpty()) {
+            "Rejected by pre-filter: ${rejectionReasons.joinToString("; ")}"
+        } else {
+            buildString {
+                appendLine("1. Verify permissive license (${licenseEval.normalizedLicense}) & dependencies ($depsSummary).")
+                appendLine("2. Wrap behind isolated adapter interface under upgrade/adapters/ (~${estRamMb}MB RAM, ~${estStorageMb}MB storage).")
+                appendLine("3. Run Robolectric unit tests + Android Lint + GitHub Actions CI before opening PR to zehn-auto.")
+            }.trim()
+        }
+
+        val detailedReport = buildString {
+            appendLine("Summary: ${description.ifBlank { name }}")
+            appendLine("Fit Score: $fitOutOf10/10 ($clampedScore/100) • Status: $statusTag")
+            appendLine("License: ${licenseEval.normalizedLicense} (${licenseEval.note})")
+            appendLine("Resources: Est RAM ~${estRamMb}MB, Storage ~${estStorageMb}MB, Battery: $batteryImpact")
+            appendLine("Security: $securitySummary")
+            if (isDup) appendLine("Overlap Note: $dupReason")
+            if (rejectionReasons.isNotEmpty()) appendLine("Pre-Filter Rejections: ${rejectionReasons.joinToString("; ")}")
+            appendLine("Plan: $implPlan")
+        }.trim()
 
         return DiscoveredToolEntity(
             source = source,
@@ -270,21 +383,28 @@ class RepoSafetyAnalyzer @Inject constructor() {
             estimatedStorageMb = estStorageMb,
             batteryImpact = batteryImpact,
             compatibilityScore = clampedScore,
-            compatibilityReport = compatNote,
+            compatibilityReport = detailedReport,
             securityFlags = securitySummary,
             isDuplicate = isDup,
             duplicateReason = dupReason,
-            htmlUrl = htmlUrl
+            htmlUrl = htmlUrl,
+            fitScore = fitOutOf10,
+            statusTag = statusTag,
+            implementationPlan = implPlan,
+            hasModelCard = hasModelCard,
+            activelyMaintained = maintained,
+            rejectionReason = rejectionReasons.joinToString("; ")
         )
     }
 
     fun assessIntegrationRisk(tool: DiscoveredToolEntity, proposedPaths: List<String>): IntegrationRiskAssessment {
-        if (tool.securityFlags.startsWith("BLOCKED") || tool.license in incompatibleLicenses) {
+        if (tool.securityFlags.startsWith("BLOCKED") || tool.rejectionReason.isNotBlank() || tool.statusTag == "Rejected") {
             return IntegrationRiskAssessment(
                 riskLevel = "BLOCKED",
                 requiresApproval = true,
                 permissionsRequested = emptyList(),
-                summary = "Blocked by license (${tool.license}) or security check (${tool.securityFlags})."
+                protectedPaths = emptyList(),
+                summary = "Blocked by pre-filter/security: ${tool.rejectionReason.ifBlank { tool.securityFlags }}."
             )
         }
 
@@ -296,30 +416,24 @@ class RepoSafetyAnalyzer @Inject constructor() {
         if (combined.contains("microphone") || combined.contains("audio") || combined.contains("speech")) requestedPerms.add("RECORD_AUDIO")
         if (combined.contains("camera") || combined.contains("vision") || combined.contains("ocr")) requestedPerms.add("CAMERA")
 
-        val touchesSensitive = requestedPerms.isNotEmpty() ||
-            combined.contains("security") ||
-            combined.contains("keystore") ||
-            proposedPaths.any { p ->
-                p.contains("AndroidManifest.xml") ||
-                    p.contains("security/") ||
-                    p.contains("Accessibility") ||
-                    p.contains("Call") ||
-                    p.contains(".github/workflows")
-            }
+        val protectedHits = detectProtectedPaths(proposedPaths, combined)
+        val touchesSensitive = requestedPerms.isNotEmpty() || protectedHits.isNotEmpty()
 
         return if (touchesSensitive) {
             IntegrationRiskAssessment(
                 riskLevel = "SENSITIVE",
                 requiresApproval = true,
                 permissionsRequested = requestedPerms,
-                summary = "Modifies sensitive permissions, accessibility, call handling, security, or core config — user approval required before merging."
+                protectedPaths = protectedHits,
+                summary = "Protected area touched (${protectedHits.joinToString(", ").ifBlank { "Sensitive permissions" }}) — manual approval mandatory."
             )
         } else {
             IntegrationRiskAssessment(
                 riskLevel = "LOW",
                 requiresApproval = false,
                 permissionsRequested = emptyList(),
-                summary = "Low-risk modular adapter/feature suitable for automated staging on branch zehn-auto."
+                protectedPaths = emptyList(),
+                summary = "Low-risk modular adapter suitable for Auto-Dev PR staging on zehn-auto."
             )
         }
     }
@@ -345,5 +459,10 @@ class RepoSafetyAnalyzer @Inject constructor() {
             text.contains("onnx") || text.contains("whisper") || text.contains("litert") -> 180L
             else -> 12L
         }
+    }
+
+    companion object {
+        const val MIN_GITHUB_STARS = 15
+        const val MIN_HF_DOWNLOADS = 50
     }
 }

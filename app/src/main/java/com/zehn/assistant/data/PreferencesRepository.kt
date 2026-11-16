@@ -25,6 +25,24 @@ import javax.inject.Singleton
 
 private val Context.zehnDataStore by preferencesDataStore(name = "zehn_preferences")
 
+const val DEFAULT_DISCOVERY_TOPICS =
+    "android ai assistant kotlin\n" +
+        "android voice assistant stt tts\n" +
+        "android accessibilityservice automation\n" +
+        "computer use screen automation agent\n" +
+        "model context protocol mcp kotlin android\n" +
+        "ai agent framework kotlin\n" +
+        "mobile rag memory vector sqlite\n" +
+        "android camerax mlkit ocr vision\n" +
+        "offline speech recognition tts android\n" +
+        "on-device llm android litert gemma\n" +
+        "android security keystore privacy harden\n" +
+        "hf:urdu speech recognition\n" +
+        "hf:multilingual tts\n" +
+        "hf:gemma litert on-device\n" +
+        "hf:vision ocr mobile\n" +
+        "hf:qwen3 0.6b"
+
 @Serializable
 data class ZehnSettings(
     val onboardingCompleted: Boolean = false,
@@ -75,22 +93,43 @@ data class ZehnSettings(
     val geminiLiveModel: String = "gemini-3.1-flash-live-preview",
     val geminiLiveFallbackModel: String = "gemini-2.5-flash-native-audio-preview-12-2025",
     val geminiLiveCustomModel: String = "",
-    // V4.0 Autonomous GitHub Research, Self-Upgrade & APK Build Engine settings
+    // V4.0–V4.2 Autonomous Discovery, Auto-Dev & Verified In-App Updater settings
     val githubRepoSlug: String = "",
     val githubBaseBranch: String = "main",
     val autoDevEnabled: Boolean = false,
+    val autoApproveEnabled: Boolean = false,
     val autoMergeOnGreen: Boolean = false,
     val allowWorkflowEdits: Boolean = false,
-    val researchScheduleMode: String = "MANUAL", // MANUAL, DAILY, WEEKLY
+    val allAutoUpgradesPaused: Boolean = false,
+    val researchScheduleMode: String = "DAILY", // MANUAL, DAILY, WEEKLY (Wi-Fi daily by default)
+    val discoveryWifiOnly: Boolean = true,
+    val updaterWifiOnly: Boolean = true,
+    val releaseChannel: String = "STABLE", // STABLE or BETA
+    val discoveryTopicsCsv: String = DEFAULT_DISCOVERY_TOPICS,
     val researchFocusMode: String = "ALL_AI_TOOLS", // ALL_AI_TOOLS, SECURITY_ONLY
     val researchPaused: Boolean = false,
     val notifyOnUpdateReady: Boolean = true,
-    val notifyOnBuildFailure: Boolean = false,
+    val notifyOnBuildFailure: Boolean = true,
     val lastResearchTimestamp: Long = 0L,
     val nextScheduledResearchTimestamp: Long = 0L,
     val lastGoodCommitSha: String = "",
-    val lastGoodTagOrVersion: String = "4.0.0"
-)
+    val lastGoodTagOrVersion: String = "4.1.0",
+    val updaterBytesDownloaded: Long = 0L,
+    val lastSuccessfulVoiceTestAt: Long = 0L,
+    val lastSuccessfulVoiceTestDetail: String = ""
+) {
+    fun parsedGitHubTopics(): List<String> = discoveryTopicsCsv
+        .split('\n', ',')
+        .map { it.trim() }
+        .filter { it.isNotBlank() && !it.startsWith("hf:", ignoreCase = true) }
+
+    fun parsedHuggingFaceTopics(): List<String> = discoveryTopicsCsv
+        .split('\n', ',')
+        .map { it.trim() }
+        .filter { it.startsWith("hf:", ignoreCase = true) }
+        .map { it.substring(3).trim() }
+        .filter { it.isNotBlank() }
+}
 
 @Singleton
 class PreferencesRepository @Inject constructor(
@@ -140,9 +179,15 @@ class PreferencesRepository @Inject constructor(
         val GH_REPO = stringPreferencesKey("github_repo_slug")
         val GH_BASE_BRANCH = stringPreferencesKey("github_base_branch")
         val AUTO_DEV_ENABLED = booleanPreferencesKey("auto_dev_enabled")
+        val AUTO_APPROVE_ENABLED = booleanPreferencesKey("auto_approve_enabled")
         val AUTO_MERGE_GREEN = booleanPreferencesKey("auto_merge_on_green")
         val ALLOW_WORKFLOW_EDITS = booleanPreferencesKey("allow_workflow_edits")
+        val ALL_UPGRADES_PAUSED = booleanPreferencesKey("all_auto_upgrades_paused")
         val RESEARCH_SCHEDULE = stringPreferencesKey("research_schedule_mode")
+        val DISCOVERY_WIFI_ONLY = booleanPreferencesKey("discovery_wifi_only")
+        val UPDATER_WIFI_ONLY = booleanPreferencesKey("updater_wifi_only")
+        val RELEASE_CHANNEL = stringPreferencesKey("release_channel")
+        val DISCOVERY_TOPICS = stringPreferencesKey("discovery_topics_csv")
         val RESEARCH_FOCUS = stringPreferencesKey("research_focus_mode")
         val RESEARCH_PAUSED = booleanPreferencesKey("research_paused")
         val NOTIFY_UPDATE_READY = booleanPreferencesKey("notify_update_ready")
@@ -151,6 +196,9 @@ class PreferencesRepository @Inject constructor(
         val NEXT_RESEARCH_TS = longPreferencesKey("next_research_ts")
         val LAST_GOOD_SHA = stringPreferencesKey("last_good_commit_sha")
         val LAST_GOOD_VER = stringPreferencesKey("last_good_tag_or_version")
+        val UPDATER_BYTES = longPreferencesKey("updater_bytes_downloaded")
+        val LAST_VOICE_TEST_AT = longPreferencesKey("last_successful_voice_test_at")
+        val LAST_VOICE_TEST_DETAIL = stringPreferencesKey("last_successful_voice_test_detail")
     }
 
     val settings: Flow<ZehnSettings> = context.zehnDataStore.data.map { p ->
@@ -202,17 +250,26 @@ class PreferencesRepository @Inject constructor(
             githubRepoSlug = p[Keys.GH_REPO] ?: "",
             githubBaseBranch = p[Keys.GH_BASE_BRANCH]?.ifBlank { "main" } ?: "main",
             autoDevEnabled = p[Keys.AUTO_DEV_ENABLED] ?: false,
+            autoApproveEnabled = p[Keys.AUTO_APPROVE_ENABLED] ?: false,
             autoMergeOnGreen = p[Keys.AUTO_MERGE_GREEN] ?: false,
             allowWorkflowEdits = p[Keys.ALLOW_WORKFLOW_EDITS] ?: false,
+            allAutoUpgradesPaused = p[Keys.ALL_UPGRADES_PAUSED] ?: false,
             researchScheduleMode = p[Keys.RESEARCH_SCHEDULE] ?: defaults.researchScheduleMode,
+            discoveryWifiOnly = p[Keys.DISCOVERY_WIFI_ONLY] ?: true,
+            updaterWifiOnly = p[Keys.UPDATER_WIFI_ONLY] ?: true,
+            releaseChannel = p[Keys.RELEASE_CHANNEL] ?: defaults.releaseChannel,
+            discoveryTopicsCsv = p[Keys.DISCOVERY_TOPICS]?.takeIf { it.isNotBlank() } ?: defaults.discoveryTopicsCsv,
             researchFocusMode = p[Keys.RESEARCH_FOCUS] ?: defaults.researchFocusMode,
             researchPaused = p[Keys.RESEARCH_PAUSED] ?: false,
             notifyOnUpdateReady = p[Keys.NOTIFY_UPDATE_READY] ?: true,
-            notifyOnBuildFailure = p[Keys.NOTIFY_BUILD_FAILURE] ?: false,
+            notifyOnBuildFailure = p[Keys.NOTIFY_BUILD_FAILURE] ?: true,
             lastResearchTimestamp = p[Keys.LAST_RESEARCH_TS] ?: 0L,
             nextScheduledResearchTimestamp = p[Keys.NEXT_RESEARCH_TS] ?: 0L,
             lastGoodCommitSha = p[Keys.LAST_GOOD_SHA] ?: "",
-            lastGoodTagOrVersion = p[Keys.LAST_GOOD_VER] ?: defaults.lastGoodTagOrVersion
+            lastGoodTagOrVersion = p[Keys.LAST_GOOD_VER] ?: defaults.lastGoodTagOrVersion,
+            updaterBytesDownloaded = p[Keys.UPDATER_BYTES] ?: 0L,
+            lastSuccessfulVoiceTestAt = p[Keys.LAST_VOICE_TEST_AT] ?: 0L,
+            lastSuccessfulVoiceTestDetail = p[Keys.LAST_VOICE_TEST_DETAIL] ?: ""
         )
     }
 
@@ -266,17 +323,26 @@ class PreferencesRepository @Inject constructor(
                 githubRepoSlug = p[Keys.GH_REPO] ?: "",
                 githubBaseBranch = p[Keys.GH_BASE_BRANCH]?.ifBlank { "main" } ?: "main",
                 autoDevEnabled = p[Keys.AUTO_DEV_ENABLED] ?: false,
+                autoApproveEnabled = p[Keys.AUTO_APPROVE_ENABLED] ?: false,
                 autoMergeOnGreen = p[Keys.AUTO_MERGE_GREEN] ?: false,
                 allowWorkflowEdits = p[Keys.ALLOW_WORKFLOW_EDITS] ?: false,
+                allAutoUpgradesPaused = p[Keys.ALL_UPGRADES_PAUSED] ?: false,
                 researchScheduleMode = p[Keys.RESEARCH_SCHEDULE] ?: defaults.researchScheduleMode,
+                discoveryWifiOnly = p[Keys.DISCOVERY_WIFI_ONLY] ?: true,
+                updaterWifiOnly = p[Keys.UPDATER_WIFI_ONLY] ?: true,
+                releaseChannel = p[Keys.RELEASE_CHANNEL] ?: defaults.releaseChannel,
+                discoveryTopicsCsv = p[Keys.DISCOVERY_TOPICS]?.takeIf { it.isNotBlank() } ?: defaults.discoveryTopicsCsv,
                 researchFocusMode = p[Keys.RESEARCH_FOCUS] ?: defaults.researchFocusMode,
                 researchPaused = p[Keys.RESEARCH_PAUSED] ?: false,
                 notifyOnUpdateReady = p[Keys.NOTIFY_UPDATE_READY] ?: true,
-                notifyOnBuildFailure = p[Keys.NOTIFY_BUILD_FAILURE] ?: false,
+                notifyOnBuildFailure = p[Keys.NOTIFY_BUILD_FAILURE] ?: true,
                 lastResearchTimestamp = p[Keys.LAST_RESEARCH_TS] ?: 0L,
                 nextScheduledResearchTimestamp = p[Keys.NEXT_RESEARCH_TS] ?: 0L,
                 lastGoodCommitSha = p[Keys.LAST_GOOD_SHA] ?: "",
-                lastGoodTagOrVersion = p[Keys.LAST_GOOD_VER] ?: defaults.lastGoodTagOrVersion
+                lastGoodTagOrVersion = p[Keys.LAST_GOOD_VER] ?: defaults.lastGoodTagOrVersion,
+                updaterBytesDownloaded = p[Keys.UPDATER_BYTES] ?: 0L,
+                lastSuccessfulVoiceTestAt = p[Keys.LAST_VOICE_TEST_AT] ?: 0L,
+                lastSuccessfulVoiceTestDetail = p[Keys.LAST_VOICE_TEST_DETAIL] ?: ""
             )
             val next = transform(current)
             p[Keys.ONBOARDING] = next.onboardingCompleted
@@ -322,9 +388,15 @@ class PreferencesRepository @Inject constructor(
             p[Keys.GH_REPO] = next.githubRepoSlug.trim()
             p[Keys.GH_BASE_BRANCH] = next.githubBaseBranch.trim().ifBlank { "main" }
             p[Keys.AUTO_DEV_ENABLED] = next.autoDevEnabled
+            p[Keys.AUTO_APPROVE_ENABLED] = next.autoApproveEnabled
             p[Keys.AUTO_MERGE_GREEN] = next.autoMergeOnGreen
             p[Keys.ALLOW_WORKFLOW_EDITS] = next.allowWorkflowEdits
+            p[Keys.ALL_UPGRADES_PAUSED] = next.allAutoUpgradesPaused
             p[Keys.RESEARCH_SCHEDULE] = next.researchScheduleMode
+            p[Keys.DISCOVERY_WIFI_ONLY] = next.discoveryWifiOnly
+            p[Keys.UPDATER_WIFI_ONLY] = next.updaterWifiOnly
+            p[Keys.RELEASE_CHANNEL] = next.releaseChannel
+            p[Keys.DISCOVERY_TOPICS] = next.discoveryTopicsCsv
             p[Keys.RESEARCH_FOCUS] = next.researchFocusMode
             p[Keys.RESEARCH_PAUSED] = next.researchPaused
             p[Keys.NOTIFY_UPDATE_READY] = next.notifyOnUpdateReady
@@ -333,6 +405,9 @@ class PreferencesRepository @Inject constructor(
             p[Keys.NEXT_RESEARCH_TS] = next.nextScheduledResearchTimestamp
             p[Keys.LAST_GOOD_SHA] = next.lastGoodCommitSha
             p[Keys.LAST_GOOD_VER] = next.lastGoodTagOrVersion
+            p[Keys.UPDATER_BYTES] = next.updaterBytesDownloaded
+            p[Keys.LAST_VOICE_TEST_AT] = next.lastSuccessfulVoiceTestAt
+            p[Keys.LAST_VOICE_TEST_DETAIL] = next.lastSuccessfulVoiceTestDetail
         }
     }
 

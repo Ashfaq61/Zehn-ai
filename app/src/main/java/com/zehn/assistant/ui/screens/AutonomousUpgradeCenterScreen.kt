@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -69,16 +68,23 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
     val proposals by vm.upgradeProposals.collectAsStateWithLifecycle()
     val devRuns by vm.devRunHistory.collectAsStateWithLifecycle()
     val releases by vm.releaseHistory.collectAsStateWithLifecycle()
+    val errorLogs by vm.upgradeErrorLogs.collectAsStateWithLifecycle()
     val research by vm.researchState.collectAsStateWithLifecycle()
     val ghConn by vm.githubConnection.collectAsStateWithLifecycle()
     val devState by vm.autoDevState.collectAsStateWithLifecycle()
+    val realMetrics by vm.realGitHubMetrics.collectAsStateWithLifecycle()
+    val dlProgress by vm.apkDownloadProgress.collectAsStateWithLifecycle()
+    val installStatus by vm.installStatus.collectAsStateWithLifecycle()
+    val storage by vm.storageTelemetry.collectAsStateWithLifecycle()
+    val onDevice by vm.onDeviceState.collectAsStateWithLifecycle()
+    val providerResults by vm.providerTestResults.collectAsStateWithLifecycle()
 
     val hasToken = remember(keysVer) { vm.crypto.hasSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN) }
     var repoDraft by remember(settings.githubRepoSlug) { mutableStateOf(settings.githubRepoSlug) }
     var branchDraft by remember(settings.githubBaseBranch) { mutableStateOf(settings.githubBaseBranch) }
     var tokenDraft by remember { mutableStateOf("") }
     var searchTopicDraft by remember { mutableStateOf("") }
-    var activeTab by remember { mutableIntStateOf(0) } // 0=Proposals, 1=Tools, 2=Releases, 3=Logs
+    var activeTab by remember { mutableIntStateOf(0) } // 0=Proposals, 1=Discovery, 2=Updater, 3=Health, 4=Monitor & Logs
 
     val notifPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
@@ -86,9 +92,10 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
     fun formatTs(ts: Long): String = if (ts <= 0L) "Not yet" else fmt.format(Date(ts))
 
     val approvedCount = proposals.count { it.status == "APPROVED" || it.status == "STAGED" || it.status == "MERGED" }
-    val integratedCount = proposals.count { it.status == "STAGED" || it.status == "MERGED" }
-    val passedBuildRuns = devRuns.count { it.actionType == "BUILD_POLL" && it.success }
     val latestReleaseVer = releases.firstOrNull()?.tagName ?: "v${BuildConfig.VERSION_NAME} (local)"
+    val openPrDisplay = if (realMetrics.syncedWithGitHub) "${realMetrics.openAutoDevPrCount}/2" else "${proposals.count { it.status == "STAGED" }}/2"
+    val mergedPrDisplay = if (realMetrics.syncedWithGitHub) realMetrics.mergedAutoDevPrCount else proposals.count { it.status == "MERGED" }
+    val ciPassDisplay = if (realMetrics.syncedWithGitHub) realMetrics.passedCiRunsCount else devRuns.count { it.actionType == "BUILD_POLL" && it.success }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -98,20 +105,28 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
         item {
             Text("Autonomous Upgrade Center", style = MaterialTheme.typography.headlineMedium, color = ZehnColors.FrostWhite)
             Text(
-                "DISCOVER -> ANALYZE -> PLAN -> IMPLEMENT -> TEST -> REVIEW -> BUILD -> NOTIFY",
+                "DISCOVER -> FILTER (<7 Suggested, >=8 Gated) -> CI PR (Max 2) -> VERIFY SHA/CERT -> INSTALL -> SAFE MODE",
                 style = MaterialTheme.typography.labelSmall,
                 color = ZehnColors.Cyan
             )
         }
 
-        // Live Telemetry & Metrics Grid
+        // Live Telemetry & Real GitHub Metrics Card
         item {
             ClayGlassCard(accentGlow = true) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("GitHub: ${if (ghConn.connected) "@${ghConn.username}" else "Not Verified"}", style = MaterialTheme.typography.titleMedium, color = if (ghConn.connected) ZehnColors.Emerald else ZehnColors.Amber)
+                        Text(
+                            text = "GitHub: ${if (ghConn.connected) "@${ghConn.username}" else "Not Verified"}",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = if (ghConn.connected) ZehnColors.Emerald else ZehnColors.Amber
+                        )
                         Text("Research: ${research.currentStage}", style = MaterialTheme.typography.bodySmall, color = ZehnColors.SlateMuted)
-                        Text("Cycle: ${devState.activeCycleStage} • Latest APK: $latestReleaseVer", style = MaterialTheme.typography.labelSmall, color = ZehnColors.Cyan)
+                        Text(
+                            "Cycle: ${devState.activeCycleStage} • Open PRs: $openPrDisplay • Latest: $latestReleaseVer",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = ZehnColors.Cyan
+                        )
                     }
                     ClayActionButton(
                         text = "STOP",
@@ -121,17 +136,29 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
                         onClick = { vm.stopResearchAndAutoDev() }
                     )
                 }
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(6.dp))
                 Text(
-                    "Last scan: ${formatTs(settings.lastResearchTimestamp)} • Next: ${if (settings.researchPaused) "PAUSED" else formatTs(settings.nextScheduledResearchTimestamp)}",
+                    "Last scan: ${formatTs(settings.lastResearchTimestamp)} • Next: ${if (settings.researchPaused || settings.allAutoUpgradesPaused) "PAUSED" else formatTs(settings.nextScheduledResearchTimestamp)}",
                     style = MaterialTheme.typography.labelSmall,
                     color = ZehnColors.SlateMuted
                 )
                 Text(
-                    "Discovered: ${tools.size} • Approved: $approvedCount • Integrated: $integratedCount • CI Checks Passed: $passedBuildRuns",
+                    "Discovered: ${tools.size} • Approved: $approvedCount • Merged PRs: $mergedPrDisplay • CI Checks Passed: $ciPassDisplay",
                     style = MaterialTheme.typography.labelSmall,
                     color = ZehnColors.FrostWhite
                 )
+                Spacer(Modifier.height(6.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (settings.allAutoUpgradesPaused) "ALL AUTO-UPGRADES PAUSED" else "Pause all auto-upgrades (Emergency)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (settings.allAutoUpgradesPaused) ZehnColors.RoseStop else ZehnColors.FrostWhite
+                    )
+                    ClayToggleSwitch(
+                        checked = settings.allAutoUpgradesPaused,
+                        onCheckedChange = { vm.togglePauseAllAutoUpgrades() }
+                    )
+                }
                 if (research.running || devState.running) {
                     Spacer(Modifier.height(8.dp))
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = ZehnColors.Cyan)
@@ -139,7 +166,7 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
             }
         }
 
-        // Primary 10 Control Actions Grid
+        // Primary Autonomous Controls
         item {
             ClayGlassCard {
                 Text("Autonomous Controls", style = MaterialTheme.typography.titleMedium, color = ZehnColors.FrostWhite)
@@ -163,11 +190,7 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    ClayActionButton("Review New Features", modifier = Modifier.weight(1f), onClick = { activeTab = 0 })
-                    ClayActionButton("Build APK", icon = Icons.Filled.Build, modifier = Modifier.weight(1f), onClick = { vm.triggerBuildApk() })
-                }
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ClayActionButton("Build APK (CI)", icon = Icons.Filled.Build, modifier = Modifier.weight(1f), onClick = { vm.triggerBuildApk() })
                     ClayActionButton("Check Updates", icon = Icons.Filled.SystemUpdate, modifier = Modifier.weight(1f), onClick = {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -176,34 +199,28 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
                         }
                         vm.checkForApkUpdates()
                     })
-                    ClayActionButton("Restore Previous Version", icon = Icons.Filled.Restore, isDanger = true, modifier = Modifier.weight(1f), onClick = {
-                        vm.restorePreviousVersion()
-                    })
                 }
-                val topPending = proposals.firstOrNull { it.status == "PENDING" }
-                if (topPending != null) {
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        ClayActionButton("Approve Integration", icon = Icons.Filled.Check, modifier = Modifier.weight(1f), onClick = {
-                            vm.approveProposalAndStage(topPending.id, stageToGitHub = true)
-                        })
-                        ClayActionButton("Reject Integration", icon = Icons.Filled.Close, isDanger = true, modifier = Modifier.weight(1f), onClick = {
-                            vm.rejectProposal(topPending.id)
-                        })
-                    }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ClayActionButton("Open Rollback PR", icon = Icons.Filled.Restore, isDanger = true, modifier = Modifier.weight(1f), onClick = {
+                        vm.restorePreviousVersionRollbackPr()
+                    })
+                    ClayActionButton("Sync Metrics", icon = Icons.Filled.Refresh, modifier = Modifier.weight(1f), onClick = {
+                        vm.refreshRealMetricsAndTelemetry()
+                    })
                 }
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = searchTopicDraft,
                     onValueChange = { searchTopicDraft = it },
-                    label = { Text("Optional focus keyword (blank = auto-scan all 14 GH + 6 HF topics)") },
+                    label = { Text("Optional focus keyword (blank = configured topics)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
             }
         }
 
-        // GitHub Auth & Schedule Settings
+        // GitHub Connection & Safety Policy
         item {
             ClayGlassCard {
                 Text("GitHub Connection & Safety Policy", style = MaterialTheme.typography.titleMedium, color = ZehnColors.FrostWhite)
@@ -220,7 +237,7 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
                 OutlinedTextField(
                     value = tokenDraft,
                     onValueChange = { tokenDraft = it },
-                    label = { Text(if (hasToken) "Replace GitHub PAT (•••• saved)" else "GitHub Fine-Grained PAT (Contents/PR/Actions)") },
+                    label = { Text(if (hasToken) "Replace GitHub PAT (•••• saved)" else "GitHub Fine-Grained PAT (Contents/PR/Actions/Issues)") },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("gh_token_input")
@@ -242,13 +259,13 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("Master Auto-Dev (low-risk staging)", color = ZehnColors.FrostWhite, style = MaterialTheme.typography.bodyMedium)
+                    Text("Master Auto-Dev (low-risk PR staging)", color = ZehnColors.FrostWhite, style = MaterialTheme.typography.bodyMedium)
                     ClayToggleSwitch(checked = settings.autoDevEnabled, onCheckedChange = {
                         vm.updateAutoDevSafetyFlags(it, settings.autoMergeOnGreen, settings.allowWorkflowEdits, settings.notifyOnUpdateReady, settings.notifyOnBuildFailure)
                     })
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("Auto-merge low-risk PR when green", color = ZehnColors.FrostWhite, style = MaterialTheme.typography.bodyMedium)
+                    Text("Auto-merge non-protected PR when green", color = ZehnColors.FrostWhite, style = MaterialTheme.typography.bodyMedium)
                     ClayToggleSwitch(checked = settings.autoMergeOnGreen, onCheckedChange = {
                         vm.updateAutoDevSafetyFlags(settings.autoDevEnabled, it, settings.allowWorkflowEdits, settings.notifyOnUpdateReady, settings.notifyOnBuildFailure)
                     })
@@ -278,13 +295,14 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
             }
         }
 
-        // Sub-view Tabs
+        // 5 Modular Tabs
         item {
             Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(selected = activeTab == 0, onClick = { activeTab = 0 }, label = { Text("Proposals (${proposals.size})") })
-                FilterChip(selected = activeTab == 1, onClick = { activeTab = 1 }, label = { Text("Discovered (${tools.size})") })
-                FilterChip(selected = activeTab == 2, onClick = { activeTab = 2 }, label = { Text("Releases (${releases.size})") })
-                FilterChip(selected = activeTab == 3, onClick = { activeTab = 3 }, label = { Text("Audit Log (${devRuns.size})") })
+                FilterChip(selected = activeTab == 1, onClick = { activeTab = 1 }, label = { Text("Discovery (${tools.size})") })
+                FilterChip(selected = activeTab == 2, onClick = { activeTab = 2 }, label = { Text("Updater (${releases.size})") })
+                FilterChip(selected = activeTab == 3, onClick = { activeTab = 3 }, label = { Text("Health") })
+                FilterChip(selected = activeTab == 4, onClick = { activeTab = 4 }, label = { Text("Monitor & Logs (${errorLogs.size})") })
             }
         }
 
@@ -293,7 +311,7 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
                 if (proposals.isEmpty()) {
                     item {
                         ClayGlassCard {
-                            Text("No pending integration proposals yet. Tap 'Start Research' to inspect GitHub & Hugging Face safely.", color = ZehnColors.SlateMuted)
+                            Text("No integration proposals yet. Items scoring >= 7.0 create gated proposals here.", color = ZehnColors.SlateMuted)
                         }
                     }
                 } else {
@@ -301,15 +319,22 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
                         ClayGlassCard {
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text(prop.title, style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan, modifier = Modifier.weight(1f))
-                                Text("${prop.riskLevel} • ${prop.status}", style = MaterialTheme.typography.labelSmall, color = if (prop.riskLevel == "SENSITIVE") ZehnColors.Amber else ZehnColors.Emerald)
+                                Text(
+                                    "${prop.riskLevel} • ${String.format(Locale.US, "%.1f", prop.fitScore)}/10 • ${prop.status}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (prop.riskLevel == "SENSITIVE") ZehnColors.Amber else ZehnColors.Emerald
+                                )
                             }
                             Spacer(Modifier.height(4.dp))
                             Text(prop.summary, style = MaterialTheme.typography.bodySmall, color = ZehnColors.FrostWhite)
+                            if (prop.protectedPathsFlagged.isNotBlank()) {
+                                Text("PROTECTED PATHS: ${prop.protectedPathsFlagged}", style = MaterialTheme.typography.labelSmall, color = ZehnColors.RoseStop)
+                            }
                             if (prop.permissionsRequested.isNotBlank()) {
                                 Text("Permissions: ${prop.permissionsRequested}", style = MaterialTheme.typography.labelSmall, color = ZehnColors.Amber)
                             }
                             if (prop.branchName.isNotBlank()) {
-                                Text("Branch: ${prop.branchName} • CI: ${prop.lastBuildConclusion.ifBlank { "unbuilt" }}", style = MaterialTheme.typography.labelSmall, color = ZehnColors.SlateMuted)
+                                Text("Branch: ${prop.branchName} • CI: ${prop.lastBuildConclusion.ifBlank { "unbuilt" }} • Retries: ${prop.retryAttempts}/5", style = MaterialTheme.typography.labelSmall, color = ZehnColors.SlateMuted)
                             }
                             Spacer(Modifier.height(8.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -320,52 +345,10 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
                     }
                 }
             }
-            1 -> {
-                items(tools, key = { it.id }) { t ->
-                    ClayGlassCard {
-                        Text("${t.source}: ${t.identifier}", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan)
-                        Text(
-                            "Score ${t.compatibilityScore}/100 • License: ${t.license} • ${if (t.source == "GITHUB") "★ ${t.starsOrDownloads}" else "${t.starsOrDownloads} dl"} • Updated ${t.lastUpdated}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = ZehnColors.SlateMuted
-                        )
-                        Text(t.description, style = MaterialTheme.typography.bodySmall, color = ZehnColors.FrostWhite)
-                        Text(
-                            "Deps: ${t.dependenciesSummary} • RAM ~${t.estimatedRamMb}MB • Battery: ${t.batteryImpact} • Security: ${t.securityFlags}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (t.securityFlags.startsWith("BLOCKED")) ZehnColors.RoseStop else ZehnColors.Emerald
-                        )
-                    }
-                }
-            }
-            2 -> {
-                item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        ClayActionButton("Check GitHub Releases", modifier = Modifier.weight(1f), onClick = { vm.checkForApkUpdates() })
-                        ClayActionButton("Poll CI Status", modifier = Modifier.weight(1f), onClick = { vm.pollBuildStatus() })
-                    }
-                }
-                items(releases, key = { it.id }) { rel ->
-                    ClayGlassCard {
-                        Text("${rel.tagName} (${rel.releaseName})", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan)
-                        Text("${rel.compatibilityNote} • ${rel.apkAssetName.ifBlank { "GitHub Release" }}", style = MaterialTheme.typography.labelSmall, color = ZehnColors.Emerald)
-                        Text(rel.changelog.take(220), style = MaterialTheme.typography.bodySmall, color = ZehnColors.FrostWhite)
-                        Spacer(Modifier.height(6.dp))
-                        ClayActionButton("Download & Install Update", icon = Icons.Filled.SystemUpdate, onClick = { vm.openReleaseDownload(rel) })
-                    }
-                }
-            }
-            else -> {
-                items(devRuns, key = { it.id }) { run ->
-                    ClayGlassCard {
-                        Text("${run.actionType} (${run.branchOrRef}) • HTTP ${run.httpStatus}", style = MaterialTheme.typography.titleSmall, color = if (run.success) ZehnColors.Emerald else ZehnColors.RoseStop)
-                        Text(run.summary, style = MaterialTheme.typography.bodySmall, color = ZehnColors.FrostWhite)
-                        if (run.detail.isNotBlank()) {
-                            Text(run.detail.take(180), style = MaterialTheme.typography.labelSmall, color = ZehnColors.SlateMuted)
-                        }
-                    }
-                }
-            }
+            1 -> discoveryTabItems(vm = vm, settings = settings, tools = tools)
+            2 -> updaterTabItems(vm = vm, settings = settings, releases = releases, dlProgress = dlProgress, installStatus = installStatus, storage = storage)
+            3 -> healthTabItems(vm = vm, settings = settings, onDevice = onDevice, providerResults = providerResults)
+            else -> monitorAndLogsTabItems(vm = vm, settings = settings, storage = storage, devRuns = devRuns, errorLogs = errorLogs)
         }
     }
 }
