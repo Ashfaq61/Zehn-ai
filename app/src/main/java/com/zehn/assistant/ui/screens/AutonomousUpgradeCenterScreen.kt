@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -29,11 +31,13 @@ import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -55,6 +59,8 @@ import com.zehn.assistant.ui.components.ClayActionButton
 import com.zehn.assistant.ui.components.ClayGlassCard
 import com.zehn.assistant.ui.components.ClayToggleSwitch
 import com.zehn.assistant.ui.theme.ZehnColors
+import com.zehn.assistant.upgrade.AutoDevExecutionState
+import com.zehn.assistant.upgrade.RepoReadinessReport
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -73,6 +79,7 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
     val ghConn by vm.githubConnection.collectAsStateWithLifecycle()
     val devState by vm.autoDevState.collectAsStateWithLifecycle()
     val realMetrics by vm.realGitHubMetrics.collectAsStateWithLifecycle()
+    val repoReadiness by vm.repoReadiness.collectAsStateWithLifecycle()
     val dlProgress by vm.apkDownloadProgress.collectAsStateWithLifecycle()
     val installStatus by vm.installStatus.collectAsStateWithLifecycle()
     val storage by vm.storageTelemetry.collectAsStateWithLifecycle()
@@ -166,6 +173,16 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
             }
         }
 
+        // Build Status Dashboard Component Card
+        item {
+            BuildStatusDashboardCard(vm = vm, devState = devState)
+        }
+
+        // Repo Readiness & Bootstrap Card
+        item {
+            RepoReadinessCard(vm = vm, repoReadiness = repoReadiness)
+        }
+
         // Primary Autonomous Controls
         item {
             ClayGlassCard {
@@ -246,10 +263,12 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     ClayActionButton("Test", icon = Icons.Filled.Refresh, modifier = Modifier.weight(1f), onClick = {
                         vm.testGitHubConnection(repoDraft, branchDraft, tokenDraft)
+                        vm.checkRepoReadiness()
                         tokenDraft = ""
                     })
                     ClayActionButton("Save", icon = Icons.Filled.Check, modifier = Modifier.weight(1f), onClick = {
                         vm.saveGitHubConfig(repoDraft, branchDraft, tokenDraft)
+                        vm.checkRepoReadiness()
                         tokenDraft = ""
                     })
                     ClayActionButton("Delete", icon = Icons.Filled.Delete, isDanger = true, modifier = Modifier.weight(1f), onClick = {
@@ -350,5 +369,118 @@ fun AutonomousUpgradeCenterScreen(vm: ZehnViewModel) {
             3 -> healthTabItems(vm = vm, settings = settings, onDevice = onDevice, providerResults = providerResults)
             else -> monitorAndLogsTabItems(vm = vm, settings = settings, storage = storage, devRuns = devRuns, errorLogs = errorLogs)
         }
+    }
+}
+
+@Composable
+fun BuildStatusDashboardCard(vm: ZehnViewModel, devState: AutoDevExecutionState) {
+    val latestBuild = devState.lastBuild
+    val conclusion = latestBuild.conclusion.lowercase(Locale.US)
+    val statusColor = when (conclusion) {
+        "success" -> ZehnColors.Emerald
+        "failure" -> ZehnColors.RoseStop
+        "in_progress", "queued" -> ZehnColors.Amber
+        else -> ZehnColors.SlateMuted
+    }
+    val statusIcon = when (conclusion) {
+        "success" -> Icons.Filled.Check
+        "failure" -> Icons.Filled.Close
+        else -> Icons.Filled.Build
+    }
+
+    ClayGlassCard(accentGlow = conclusion == "success") {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
+                androidx.compose.material3.Icon(imageVector = statusIcon, contentDescription = null, tint = statusColor)
+                Column {
+                    Text("Build Status Dashboard", style = MaterialTheme.typography.titleMedium, color = ZehnColors.FrostWhite)
+                    Text(
+                        "Status: ${latestBuild.status.ifBlank { "Idle" }} • Conclusion: ${latestBuild.conclusion.ifBlank { "Pending/None" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = statusColor
+                    )
+                }
+            }
+            ClayActionButton("Poll Status", icon = Icons.Filled.Refresh, onClick = { vm.pollBuildStatus() })
+        }
+        if (latestBuild.htmlUrl.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text("Run URL: ${latestBuild.htmlUrl}", style = MaterialTheme.typography.labelSmall, color = ZehnColors.Cyan)
+        }
+    }
+}
+
+@Composable
+fun RepoReadinessCard(vm: ZehnViewModel, repoReadiness: RepoReadinessReport?) {
+    var showBootstrapConfirm by remember { mutableStateOf(false) }
+
+    ClayGlassCard {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Repository Readiness & Bootstrap", style = MaterialTheme.typography.titleMedium, color = ZehnColors.Cyan)
+                Text(
+                    if (repoReadiness == null) "Tap 'Check' to verify token, repository, workflows, keystore & actions."
+                    else if (repoReadiness.allPassed) "All 7 checks PASSED! Repo is ready for automated builds & releases."
+                    else "Some checks failed. Review fix hints below.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (repoReadiness?.allPassed == true) ZehnColors.Emerald else ZehnColors.Amber
+                )
+            }
+            ClayActionButton("Check", icon = Icons.Filled.Search, onClick = { vm.checkRepoReadiness() })
+        }
+
+        if (repoReadiness != null) {
+            Spacer(Modifier.height(8.dp))
+            repoReadiness.items.forEach { item ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        androidx.compose.material3.Icon(
+                            imageVector = if (item.passed) Icons.Filled.Check else Icons.Filled.Close,
+                            contentDescription = null,
+                            tint = if (item.passed) ZehnColors.Emerald else ZehnColors.RoseStop
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Column {
+                            Text(item.title, style = MaterialTheme.typography.bodySmall, color = ZehnColors.FrostWhite)
+                            Text(item.detail, style = MaterialTheme.typography.labelSmall, color = ZehnColors.SlateMuted)
+                            if (!item.passed && item.fixHint.isNotBlank()) {
+                                Text("Fix Hint: ${item.fixHint}", style = MaterialTheme.typography.labelSmall, color = ZehnColors.Amber)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        ClayActionButton(
+            text = "Bootstrap New Repo (Create Workflows & .gitignore)",
+            icon = Icons.Filled.Build,
+            onClick = { showBootstrapConfirm = true }
+        )
+    }
+
+    if (showBootstrapConfirm) {
+        AlertDialog(
+            onDismissRequest = { showBootstrapConfirm = false },
+            containerColor = ZehnColors.SurfaceClay,
+            title = { Text("Bootstrap New GitHub Repository", color = ZehnColors.FrostWhite) },
+            text = { Text("This will commit missing basic files (.github/workflows/build.yml, release.yml, .gitignore) to your repository's main branch via the GitHub API.", color = ZehnColors.FrostWhite) },
+            confirmButton = {
+                ClayActionButton(text = "Confirm Bootstrap", onClick = {
+                    showBootstrapConfirm = false
+                    vm.bootstrapNewRepo()
+                })
+            },
+            dismissButton = {
+                TextButton(onClick = { showBootstrapConfirm = false }) {
+                    Text("Cancel", color = ZehnColors.RoseStop)
+                }
+            }
+        )
     }
 }

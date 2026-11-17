@@ -16,24 +16,46 @@ android {
     applicationId = "com.zehn.assistant"
     minSdk = 24
     targetSdk = 35
-    versionCode = (project.findProperty("ZEHN_VERSION_CODE") as? String)?.toIntOrNull() ?: 5
-    versionName = (project.findProperty("ZEHN_VERSION_NAME") as? String)?.takeIf { it.isNotBlank() } ?: "4.1.0"
+    val runNum = (project.findProperty("ZEHN_VERSION_CODE") as? String)?.toIntOrNull()
+        ?: System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+        ?: 1
+    versionCode = runNum
+    versionName = "4.0.$runNum"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+  }
+
+  val keystoreFile = file("${rootDir}/app/debug.keystore")
+  if (!keystoreFile.exists()) {
+    try {
+      ProcessBuilder(
+        "keytool", "-genkeypair", "-v",
+        "-keystore", keystoreFile.absolutePath,
+        "-storepass", "android",
+        "-keypass", "android",
+        "-alias", "androiddebugkey",
+        "-keyalg", "RSA",
+        "-keysize", "2048",
+        "-validity", "10000",
+        "-dname", "CN=Zehn AI,O=Zehn,C=PK"
+      ).redirectErrorStream(true).start().waitFor()
+      println("Automatically generated debug.keystore at ${keystoreFile.absolutePath}")
+    } catch (e: Exception) {
+      println("Failed to auto-generate debug.keystore: ${e.message}")
+    }
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
   // and updating Android apps in AI Studio.
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      storeFile = keystoreFile
+      storePassword = "android"
+      keyAlias = "androiddebugkey"
+      keyPassword = "android"
     }
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
+      storeFile = keystoreFile
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"

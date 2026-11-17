@@ -49,6 +49,16 @@ enum class VoiceProfile(
     val localeTag: String,
     val tagline: String
 ) {
+    AOEDE("aoede", "Aoede", "Female", 1.10f, 1.02f, "en-US", "Crisp soprano"),
+    KORE("kore", "Kore", "Female", 1.04f, 0.98f, "en-US", "Warm alto"),
+    ZEPHYR("zephyr", "Zephyr", "Female", 1.05f, 1.00f, "en-GB", "Bright tenor"),
+    LEDA("leda", "Leda", "Female", 1.02f, 0.98f, "en-US", "Smooth mezzo"),
+    CALLIRRHOE("callirrhoe", "Callirrhoe", "Female", 1.08f, 0.96f, "en-US", "Rich resonant"),
+    AUTONOE("autonoe", "Autonoe", "Female", 1.07f, 1.01f, "en-US", "Clear expressive"),
+    CHARON("charon", "Charon", "Male", 0.90f, 1.00f, "en-US", "Deep calm baritone"),
+    PUCK("puck", "Puck", "Male", 0.95f, 1.02f, "en-US", "Playful tenor"),
+    FENRIR("fenrir", "Fenrir", "Male", 0.88f, 0.96f, "en-US", "Powerful bass"),
+    ORUS("orus", "Orus", "Male", 0.85f, 0.95f, "en-GB", "Commanding studio bass"),
     ARIA("aria", "Aria", "Female", 1.10f, 1.02f, "en-US", "Crisp assistant soprano"),
     ZARA("zara", "Zara", "Female", 1.04f, 0.98f, "en-GB", "Warm conversational alto"),
     NOOR("noor", "Noor", "Female", 1.08f, 0.96f, "ur-PK", "Bilingual Urdu & English"),

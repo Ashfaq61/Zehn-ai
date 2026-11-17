@@ -1158,23 +1158,22 @@ class GeminiLiveAudioClient @Inject constructor(
         val fullModelName = if (modelId.startsWith("models/")) modelId else "models/$modelId"
         val prebuiltVoiceName = mapProfileToGeminiVoice(voiceProfile)
 
+        val genConfig = JSONObject()
+            .put("responseModalities", JSONArray().put("AUDIO"))
+            .put(
+                "speechConfig",
+                JSONObject().put(
+                    "voiceConfig",
+                    JSONObject().put(
+                        "prebuiltVoiceConfig",
+                        JSONObject().put("voiceName", prebuiltVoiceName)
+                    )
+                )
+            )
+
         val setupObj = JSONObject().apply {
             put("model", fullModelName)
-            put(
-                "generationConfig",
-                JSONObject()
-                    .put("responseModalities", JSONArray().put("AUDIO"))
-                    .put(
-                        "speechConfig",
-                        JSONObject().put(
-                            "voiceConfig",
-                            JSONObject().put(
-                                "prebuiltVoiceConfig",
-                                JSONObject().put("voiceName", prebuiltVoiceName)
-                            )
-                        )
-                    )
-            )
+            put("generationConfig", genConfig)
             if (personaPrompt.isNotBlank()) {
                 put(
                     "systemInstruction",
@@ -1193,14 +1192,17 @@ class GeminiLiveAudioClient @Inject constructor(
     }
 
     private fun mapProfileToGeminiVoice(profile: VoiceProfile): String = when (profile) {
-        VoiceProfile.ARIA -> "Aoede"
-        VoiceProfile.ZARA -> "Zephyr"
-        VoiceProfile.NOOR -> "Kore"
-        VoiceProfile.MEERA -> "Leda"
-        VoiceProfile.ORION -> "Charon"
-        VoiceProfile.ZAYD -> "Puck"
-        VoiceProfile.KABIR -> "Fenrir"
-        VoiceProfile.ATLAS -> "Orus"
+        VoiceProfile.AOEDE -> "Aoede"
+        VoiceProfile.KORE -> "Kore"
+        VoiceProfile.ZEPHYR -> "Zephyr"
+        VoiceProfile.LEDA -> "Leda"
+        VoiceProfile.CALLIRRHOE -> "Callirrhoe"
+        VoiceProfile.AUTONOE -> "Autonoe"
+        VoiceProfile.CHARON -> "Charon"
+        VoiceProfile.PUCK -> "Puck"
+        VoiceProfile.FENRIR -> "Fenrir"
+        VoiceProfile.ORUS -> "Orus"
+        else -> "Aoede"
     }
 
     private fun buildToolDeclarations(): JSONArray {

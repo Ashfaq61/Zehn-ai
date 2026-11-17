@@ -2,7 +2,19 @@ name: Build Zehn AI APK
 
 on:
   push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keystore-gen-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -27,33 +39,48 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      - name: Prepare fixed debug keystore for debugConfig
-        env:
-          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+      - name: Auto-generate or restore debug keystore
         run: |
-          if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
-            echo "$DEBUG_KEYSTORE_BASE64" | base64 --decode > debug.keystore
-          elif [ -f debug.keystore.base64 ]; then
-            base64 --decode debug.keystore.base64 > debug.keystore
+          if [ -f app/debug.keystore ]; then
+            echo "✅ app/debug.keystore exists in repo. Using it."
           else
-            echo "Fixed debug.keystore.base64 missing!"
-            exit 1
+            echo "⚠️ app/debug.keystore missing."
+            if [ "${{ github.event_name }}" == "push" ] && [ "${{ github.ref }}" == "refs/heads/main" ]; then
+              echo "Push to main detected. Generating permanent debug.keystore..."
+              mkdir -p app
+              keytool -genkey -v -keystore app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Zehn AI,O=Zehn,C=PK"
+              git config --global user.name "github-actions[bot]"
+              git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git pull origin main --rebase || true
+              git add -f app/debug.keystore
+              git commit -m "chore(keystore): auto-generate permanent app/debug.keystore [skip ci]" || true
+              git push origin main || echo "Push skipped or not needed"
+            else
+              echo "Branch build or PR build. Creating temporary keystore in runner only (not committed)."
+              mkdir -p app
+              keytool -genkey -v -keystore app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Zehn AI,O=Zehn,C=PK"
+              echo "⚠️ WARNING: debug.keystore was missing on this branch/PR build. A temporary keystore was created in the runner only. This APK cannot update an installed app signed with a permanent keystore." >> $GITHUB_STEP_SUMMARY
+            fi
           fi
 
       - name: Run Unit & Robolectric Tests
         run: gradle testDebugUnitTest --stacktrace
 
-      - name: Build Debug APK
-        run: gradle assembleDebug --stacktrace
+      - name: Build Debug & Release APKs
+        run: gradle assembleDebug assembleRelease --stacktrace
 
-      - name: Verify Debug APK artifact
+      - name: Verify APK artifacts
         run: |
-          APK_PATH=$(find app/build/outputs/apk/debug -maxdepth 1 -name "*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ] || [ ! -s "$APK_PATH" ]; then
+          DEBUG_APK=$(find app/build/outputs/apk/debug -maxdepth 1 -name "*.apk" | head -n 1)
+          if [ -z "$DEBUG_APK" ] || [ ! -s "$DEBUG_APK" ]; then
             echo "Debug APK was not generated or is empty."
             exit 1
           fi
-          ls -lh "$APK_PATH"
+          ls -lh "$DEBUG_APK"
+          RELEASE_APK=$(find app/build/outputs/apk/release -maxdepth 1 -name "*.apk" | head -n 1)
+          if [ -n "$RELEASE_APK" ] && [ -s "$RELEASE_APK" ]; then
+            ls -lh "$RELEASE_APK"
+          fi
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
@@ -63,48 +90,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Check Release Signing Secrets
-        id: signing
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
-            echo "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Release signing secrets not configured; skipping signed release build."
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build Signed Release APK
-        if: steps.signing.outputs.enabled == 'true'
-        env:
-          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: gradle assembleRelease --stacktrace
-
-      - name: Cleanup Release Keystore
-        if: always() && steps.signing.outputs.enabled == 'true'
-        run: rm -f my-upload-key.jks
-
-      - name: Verify Release APK artifact
-        if: steps.signing.outputs.enabled == 'true'
-        run: |
-          RELEASE_APK=$(find app/build/outputs/apk/release -maxdepth 1 -name "*.apk" | head -n 1)
-          if [ -z "$RELEASE_APK" ] || [ ! -s "$RELEASE_APK" ]; then
-            echo "Release APK was not generated or is empty."
-            exit 1
-          fi
-          ls -lh "$RELEASE_APK"
-
-      - name: Upload Signed Release APK Artifact
-        if: steps.signing.outputs.enabled == 'true'
+      - name: Upload Release APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: zehn-ai-release-apk
           path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30

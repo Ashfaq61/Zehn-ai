@@ -24,12 +24,13 @@ data class LiteRtModelSpec(
 }
 
 object ProviderCatalog {
-    const val DEFAULT_GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview"
-    const val FALLBACK_GEMINI_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+    const val DEFAULT_GEMINI_LIVE_MODEL = "gemini-3.8-live"
+    const val FALLBACK_GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview"
 
     val defaultGeminiLiveModels: List<ModelOption> = listOf(
-        ModelOption(DEFAULT_GEMINI_LIVE_MODEL, "Gemini 3.1 Flash Live", "Live Audio", true),
-        ModelOption(FALLBACK_GEMINI_LIVE_MODEL, "Gemini 2.5 Flash Native Audio", "Live Audio", true)
+        ModelOption("gemini-3.8-live", "Gemini 3.8 Live", "Live Audio", true),
+        ModelOption("gemini-3.1-flash-live-preview", "Gemini 3.1 Flash Live (preview)", "Live Audio", true),
+        ModelOption("gemini-2.5-flash-native-audio-preview-12-2025", "Gemini 2.5 Flash Native Audio (Dec 2025)", "Live Audio", true)
     )
 
     val modelsByProvider: Map<AiProvider, List<ModelOption>> = mapOf(

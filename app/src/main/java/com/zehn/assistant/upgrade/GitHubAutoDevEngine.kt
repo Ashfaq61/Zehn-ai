@@ -9,6 +9,7 @@ import com.zehn.assistant.data.db.UpgradeCenterDao
 import com.zehn.assistant.data.db.UpgradeErrorLogEntity
 import com.zehn.assistant.data.db.UpgradeProposalEntity
 import com.zehn.assistant.security.KeystoreCryptoManager
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -63,6 +64,18 @@ data class AutoDevExecutionState(
     val currentBranch: String = "",
     val lastBuild: WorkflowBuildStatus = WorkflowBuildStatus(),
     val statusMessage: String = "Idle"
+)
+
+data class RepoReadinessItem(
+    val title: String,
+    val passed: Boolean,
+    val detail: String,
+    val fixHint: String
+)
+
+data class RepoReadinessReport(
+    val items: List<RepoReadinessItem>,
+    val allPassed: Boolean
 )
 
 /**
@@ -1097,6 +1110,156 @@ class GitHubAutoDevEngine @Inject constructor(
             if (delta in 1..15_000L) return delta
         }
         return defaultMs.coerceIn(500L, 15_000L)
+    }
+
+    suspend fun checkRepoReadiness(): Result<RepoReadinessReport> = withContext(Dispatchers.IO) {
+        val settings = prefs.settings.first()
+        val token = crypto.getSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN).trim()
+        val repo = settings.githubRepoSlug.trim()
+        val items = mutableListOf<RepoReadinessItem>()
+
+        if (token.isBlank()) {
+            return@withContext Result.success(
+                RepoReadinessReport(
+                    items = listOf(RepoReadinessItem("GitHub Token", false, "Token is empty", "Add your fine-grained GitHub PAT in Settings / Upgrade Center")),
+                    allPassed = false
+                )
+            )
+        }
+        if (!repo.contains('/') || repo.split('/').size != 2) {
+            return@withContext Result.success(
+                RepoReadinessReport(
+                    items = listOf(RepoReadinessItem("Repository Slug", false, "Invalid owner/repo format: '$repo'", "Enter repository in 'owner/repo' format in Settings")),
+                    allPassed = false
+                )
+            )
+        }
+
+        val userRes = executeGitHubRequest("GET", "https://api.github.com/user", token)
+        val tokenPassed = userRes.isSuccess
+        items.add(
+            RepoReadinessItem(
+                title = "GitHub Token Valid",
+                passed = tokenPassed,
+                detail = if (tokenPassed) "Authenticated successfully" else userRes.exceptionOrNull()?.message ?: "Auth failed",
+                fixHint = "Check that your PAT is valid and not expired."
+            )
+        )
+
+        val repoRes = executeGitHubRequest("GET", "https://api.github.com/repos/$repo", token)
+        val repoPassed = repoRes.isSuccess
+        var pushAllowed = false
+        if (repoPassed) {
+            val repoObj = JSONObject(repoRes.getOrThrow().second)
+            val perms = repoObj.optJSONObject("permissions")
+            pushAllowed = perms?.optBoolean("push", false) ?: false
+        }
+        items.add(
+            RepoReadinessItem(
+                title = "Repository Reachable",
+                passed = repoPassed,
+                detail = if (repoPassed) "Repository '$repo' accessed" else repoRes.exceptionOrNull()?.message ?: "Not accessible",
+                fixHint = "Check repository spelling and ensure PAT has access to '$repo'."
+            )
+        )
+
+        items.add(
+            RepoReadinessItem(
+                title = "Contents Write Permissions",
+                passed = pushAllowed,
+                detail = if (pushAllowed) "Push (Contents: write) verified" else "Read-only or insufficient permissions",
+                fixHint = "Settings > Developer Settings > Personal Access Tokens: enable Contents (Read and write), Pull requests, Actions, Issues."
+            )
+        )
+
+        val actionsRes = executeGitHubRequest("GET", "https://api.github.com/repos/$repo/actions/runs?per_page=1", token)
+        val actionsPassed = actionsRes.isSuccess
+        items.add(
+            RepoReadinessItem(
+                title = "GitHub Actions Enabled",
+                passed = actionsPassed,
+                detail = if (actionsPassed) "Actions API responsive" else "Actions check failed or disabled",
+                fixHint = "GitHub Repository > Settings > Actions > General: ensure Actions are enabled."
+            )
+        )
+
+        val ksRes = executeGitHubRequest("GET", "https://api.github.com/repos/$repo/contents/app/debug.keystore?ref=main", token)
+        val ksPassed = ksRes.isSuccess
+        items.add(
+            RepoReadinessItem(
+                title = "Keystore on Main",
+                passed = ksPassed,
+                detail = if (ksPassed) "app/debug.keystore exists on main" else "app/debug.keystore not found on main yet",
+                fixHint = "Push to main once (or use Bootstrap new repo) so workflow auto-generates debug.keystore."
+            )
+        )
+
+        val buildYmlRes = executeGitHubRequest("GET", "https://api.github.com/repos/$repo/contents/.github/workflows/build.yml?ref=main", token)
+        val buildYmlPassed = buildYmlRes.isSuccess
+        items.add(
+            RepoReadinessItem(
+                title = "build.yml Workflow Present",
+                passed = buildYmlPassed,
+                detail = if (buildYmlPassed) ".github/workflows/build.yml found on main" else "build.yml missing on main",
+                fixHint = "Tap 'Bootstrap new repo' below to create missing workflow files."
+            )
+        )
+
+        var latestBuildOk = false
+        var buildDetail = "No runs found"
+        if (actionsPassed) {
+            runCatching {
+                val runsArr = JSONObject(actionsRes.getOrThrow().second).optJSONArray("workflow_runs")
+                if (runsArr != null && runsArr.length() > 0) {
+                    val latest = runsArr.getJSONObject(0)
+                    val status = latest.optString("status", "")
+                    val conclusion = latest.optString("conclusion", "")
+                    latestBuildOk = (conclusion == "success")
+                    buildDetail = "Run #${latest.optLong("id")}: status=$status, conclusion=${conclusion.ifBlank { "running" }}"
+                }
+            }
+        }
+        items.add(
+            RepoReadinessItem(
+                title = "Latest Build Status",
+                passed = latestBuildOk,
+                detail = buildDetail,
+                fixHint = "Ensure workflow permissions are set to Read and write, then trigger a build."
+            )
+        )
+
+        val allPassed = items.all { it.passed }
+        Result.success(RepoReadinessReport(items = items, allPassed = allPassed))
+    }
+
+    suspend fun bootstrapNewRepoFiles(): Result<String> = withContext(Dispatchers.IO) {
+        val settings = prefs.settings.first()
+        val token = crypto.getSecret(KeystoreCryptoManager.KEY_GITHUB_TOKEN).trim()
+        val repo = settings.githubRepoSlug.trim()
+        val baseBranch = settings.githubBaseBranch.ifBlank { "main" }
+
+        if (token.isBlank() || !repo.contains('/')) {
+            return@withContext Result.failure(IllegalStateException("Configure GitHub token and owner/repo first."))
+        }
+
+        val buildYmlContent = runCatching { File(".github/workflows/build.yml").readText() }.getOrElse { "" }
+        val releaseYmlContent = runCatching { File(".github/workflows/release.yml").readText() }.getOrElse { "" }
+        val gitignoreContent = runCatching { File(".gitignore").readText() }.getOrElse { "*.iml\n/build\n/app/build\n*.keystore" }
+
+        val changes = listOf(
+            CommitFileChange(".github/workflows/build.yml", buildYmlContent),
+            CommitFileChange(".github/workflows/release.yml", releaseYmlContent),
+            CommitFileChange(".gitignore", gitignoreContent)
+        )
+
+        val res = commitChangesAtomic(
+            repoSlug = repo,
+            token = token,
+            branch = baseBranch,
+            changes = changes,
+            commitMessage = "chore(bootstrap): bootstrap missing workflows and gitignore [skip ci]"
+        )
+        res.map { "Successfully bootstrapped repository files on '$baseBranch'." }
     }
 
     companion object {

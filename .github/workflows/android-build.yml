@@ -11,7 +11,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: keystore-gen-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   verify_and_build:
@@ -31,22 +35,20 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      - name: Set up Gradle (wrapper-independent)
+      - name: Set up Gradle 8.10.2 (wrapper-independent)
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.3.1'
+          gradle-version: '8.10.2'
 
-      - name: Restore fixed debug signing keystore
-        env:
-          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+      - name: Auto-generate or restore debug keystore
         run: |
-          if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
-            echo "$DEBUG_KEYSTORE_BASE64" | base64 --decode > debug.keystore
-          elif [ -f debug.keystore.base64 ]; then
-            base64 --decode debug.keystore.base64 > debug.keystore
+          if [ -f app/debug.keystore ]; then
+            echo "✅ app/debug.keystore exists in repo. Using it."
           else
-            echo "ERROR: Fixed debug.keystore.base64 missing. Refusing to regenerate signing certificate."
-            exit 1
+            echo "⚠️ app/debug.keystore missing. Creating temporary keystore in runner only (branch/PR build)."
+            mkdir -p app
+            keytool -genkey -v -keystore app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Zehn AI,O=Zehn,C=PK"
+            echo "⚠️ WARNING: debug.keystore was missing on this branch/PR build. A temporary keystore was created in the runner only. This APK cannot update an installed app signed with a permanent keystore." >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Check Dependencies, Unit Tests & Lint

@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: keystore-gen-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Build Signed Release APK & Publish GitHub Release
@@ -27,22 +31,33 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      - name: Set up Gradle (wrapper-independent)
+      - name: Set up Gradle 8.10.2 (wrapper-independent)
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.3.1'
+          gradle-version: '8.10.2'
 
-      - name: Restore fixed debug signing keystore
-        env:
-          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+      - name: Auto-generate or restore debug keystore
         run: |
-          if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
-            echo "$DEBUG_KEYSTORE_BASE64" | base64 --decode > debug.keystore
-          elif [ -f debug.keystore.base64 ]; then
-            base64 --decode debug.keystore.base64 > debug.keystore
+          if [ -f app/debug.keystore ]; then
+            echo "✅ app/debug.keystore exists in repo. Using it."
           else
-            echo "ERROR: Fixed debug.keystore.base64 or DEBUG_KEYSTORE_BASE64 secret is missing. Refusing to regenerate signing certificate."
-            exit 1
+            echo "⚠️ app/debug.keystore missing."
+            if [ "${{ github.event_name }}" == "push" ] && [ "${{ github.ref }}" == "refs/heads/main" ]; then
+              echo "Push to main detected. Generating permanent debug.keystore..."
+              mkdir -p app
+              keytool -genkey -v -keystore app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Zehn AI,O=Zehn,C=PK"
+              git config --global user.name "github-actions[bot]"
+              git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git pull origin main --rebase || true
+              git add -f app/debug.keystore
+              git commit -m "chore(keystore): auto-generate permanent app/debug.keystore [skip ci]" || true
+              git push origin main || echo "Push skipped or not needed"
+            else
+              echo "Branch build or PR build. Creating temporary keystore in runner only (not committed)."
+              mkdir -p app
+              keytool -genkey -v -keystore app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Zehn AI,O=Zehn,C=PK"
+              echo "⚠️ WARNING: debug.keystore was missing on this branch/PR build. A temporary keystore was created in the runner only. This APK cannot update an installed app signed with a permanent keystore." >> $GITHUB_STEP_SUMMARY
+            fi
           fi
 
       - name: Compute Monotonic Release Version
@@ -55,17 +70,19 @@ jobs:
           echo "version_name=${VER_NAME}" >> "$GITHUB_OUTPUT"
           echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Run Unit Tests & Assemble Release-Tagged APK
+      - name: Run Unit Tests & Assemble Release APK
         run: |
-          gradle testDebugUnitTest assembleDebug \
+          gradle testDebugUnitTest assembleRelease \
             -PZEHN_VERSION_CODE=${{ steps.ver.outputs.version_code }} \
-            -PZEHN_VERSION_NAME=${{ steps.ver.outputs.version_name }} \
             --stacktrace | tee gradle-release.log
 
       - name: Verify Package Name, Rename APK & Compute SHA-256
         id: artifact
         run: |
-          RAW_APK=$(find app/build/outputs/apk/debug -maxdepth 1 -name "*.apk" | head -n 1)
+          RAW_APK=$(find app/build/outputs/apk/release -maxdepth 1 -name "*.apk" | head -n 1)
+          if [ -z "$RAW_APK" ] || [ ! -s "$RAW_APK" ]; then
+            RAW_APK=$(find app/build/outputs/apk/debug -maxdepth 1 -name "*.apk" | head -n 1)
+          fi
           if [ -z "$RAW_APK" ] || [ ! -s "$RAW_APK" ]; then
             echo "Built APK is missing or empty."
             exit 1

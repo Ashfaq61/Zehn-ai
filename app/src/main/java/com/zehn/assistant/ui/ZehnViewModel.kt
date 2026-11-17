@@ -41,6 +41,7 @@ import com.zehn.assistant.data.BackupManager
 import com.zehn.assistant.data.PreferencesRepository
 import com.zehn.assistant.data.StorageBatteryTelemetry
 import com.zehn.assistant.data.ZehnSettings
+import com.zehn.assistant.upgrade.RepoReadinessReport
 import com.zehn.assistant.data.db.ActionLogDao
 import com.zehn.assistant.data.db.ActionLogEntity
 import com.zehn.assistant.data.db.AutoDevRunEntity
@@ -1056,6 +1057,29 @@ class ZehnViewModel @Inject constructor(
 
     fun clearDevRunHistory() = viewModelScope.launch {
         upgradeCenterDao.clearDevRuns()
+    }
+
+    private val _repoReadiness = MutableStateFlow<RepoReadinessReport?>(null)
+    val repoReadiness: StateFlow<RepoReadinessReport?> = _repoReadiness.asStateFlow()
+
+    fun checkRepoReadiness() = viewModelScope.launch {
+        val res = autoDevEngine.checkRepoReadiness()
+        _repoReadiness.value = res.getOrNull()
+        _toastBanner.value = res.fold(
+            onSuccess = { if (it.allPassed) "Repo readiness: All checks passed!" else "Repo readiness: Some items need attention" },
+            onFailure = { err -> err.message ?: "Repo readiness check failed" }
+        )
+    }
+
+    fun bootstrapNewRepo() = viewModelScope.launch {
+        val res = autoDevEngine.bootstrapNewRepoFiles()
+        _toastBanner.value = res.fold(
+            onSuccess = { msg ->
+                checkRepoReadiness()
+                msg
+            },
+            onFailure = { err -> err.message ?: "Bootstrap failed" }
+        )
     }
 
     // ---- V4.2 Self-Upgrade, In-App Updater, Safe Mode & Health Actions ----
