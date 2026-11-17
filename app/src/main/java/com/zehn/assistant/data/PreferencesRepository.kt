@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.zehn.assistant.ai.ProviderCatalog
 import com.zehn.assistant.data.model.AiExecutionMode
 import com.zehn.assistant.data.model.AiProvider
 import com.zehn.assistant.data.model.LiteRtBackend
@@ -90,8 +91,8 @@ data class ZehnSettings(
     val samsungBatteryGuideDismissed: Boolean = false,
     val userDisplayName: String = "Zehn Explorer",
     val geminiLiveVoiceEnabled: Boolean = true,
-    val geminiLiveModel: String = "gemini-3.1-flash-live-preview",
-    val geminiLiveFallbackModel: String = "gemini-2.5-flash-native-audio-preview-12-2025",
+    val geminiLiveModel: String = ProviderCatalog.DEFAULT_GEMINI_LIVE_MODEL,
+    val geminiLiveFallbackModel: String = ProviderCatalog.FALLBACK_GEMINI_LIVE_MODEL,
     val geminiLiveCustomModel: String = "",
     // V4.0–V4.2 Autonomous Discovery, Auto-Dev & Verified In-App Updater settings
     val githubRepoSlug: String = "",

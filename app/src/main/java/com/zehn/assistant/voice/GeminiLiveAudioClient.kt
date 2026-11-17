@@ -31,6 +31,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
@@ -250,10 +251,7 @@ class GeminiLiveAudioClient @Inject constructor(
                 val label = obj.optString("displayName", modelId).ifBlank { modelId }
                 found.add(ModelOption(id = modelId, label = label, contextWindow = "Live Audio", supportsVision = true))
             }
-            val priorityOrder = listOf(
-                ProviderCatalog.DEFAULT_GEMINI_LIVE_MODEL,
-                ProviderCatalog.FALLBACK_GEMINI_LIVE_MODEL
-            )
+            val priorityOrder = ProviderCatalog.defaultGeminiLiveModels.map { it.id }
             found.sortedWith(
                 compareBy<ModelOption>(
                     { opt ->
@@ -401,18 +399,28 @@ class GeminiLiveAudioClient @Inject constructor(
         val cleanPreferred = preferredModel.trim().removePrefix("models/")
         val cleanFallback = fallbackModel.trim().removePrefix("models/")
 
+        val availableIds = discoveredModels.map { it.id }.toSet()
+        val priorityOrder = ProviderCatalog.defaultGeminiLiveModels.map { it.id }
+
         if (hasVerifiedServerList) {
-            val availableIds = discoveredModels.map { it.id }.toSet()
-            if (cleanPreferred in availableIds) result.add(cleanPreferred)
-            if (cleanFallback in availableIds) result.add(cleanFallback)
-            if (ProviderCatalog.DEFAULT_GEMINI_LIVE_MODEL in availableIds) result.add(ProviderCatalog.DEFAULT_GEMINI_LIVE_MODEL)
-            if (ProviderCatalog.FALLBACK_GEMINI_LIVE_MODEL in availableIds) result.add(ProviderCatalog.FALLBACK_GEMINI_LIVE_MODEL)
-            availableIds.forEach { result.add(it) }
+            if (cleanPreferred.isNotBlank() && cleanPreferred in availableIds) result.add(cleanPreferred)
+            if (cleanFallback.isNotBlank() && cleanFallback in availableIds) result.add(cleanFallback)
+            priorityOrder.forEach { id ->
+                if (id in availableIds) result.add(id)
+            }
+            discoveredModels.sortedWith(
+                compareBy<ModelOption>(
+                    { opt ->
+                        val idx = priorityOrder.indexOf(opt.id)
+                        if (idx >= 0) idx else Int.MAX_VALUE
+                    },
+                    { it.id }
+                )
+            ).forEach { result.add(it.id) }
         } else {
             if (cleanPreferred.isNotEmpty()) result.add(cleanPreferred)
             if (cleanFallback.isNotEmpty()) result.add(cleanFallback)
-            result.add(ProviderCatalog.DEFAULT_GEMINI_LIVE_MODEL)
-            result.add(ProviderCatalog.FALLBACK_GEMINI_LIVE_MODEL)
+            priorityOrder.forEach { result.add(it) }
         }
         return result.toList()
     }
@@ -955,6 +963,7 @@ class GeminiLiveAudioClient @Inject constructor(
         }
 
         // Watchdog to transition orb state back to LISTENING smoothly after audio tail drains
+        @OptIn(ExperimentalCoroutinesApi::class)
         watchdogJob = scope.launch {
             while (sessionRequested.get() && isActive) {
                 delay(220)

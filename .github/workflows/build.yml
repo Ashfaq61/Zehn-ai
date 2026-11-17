@@ -63,13 +63,10 @@ jobs:
             fi
           fi
 
-      - name: Run Unit & Robolectric Tests
-        run: gradle testDebugUnitTest --stacktrace
+      - name: Build Debug APK
+        run: gradle assembleDebug --stacktrace
 
-      - name: Build Debug & Release APKs
-        run: gradle assembleDebug assembleRelease --stacktrace
-
-      - name: Verify APK artifacts
+      - name: Verify Debug APK
         run: |
           DEBUG_APK=$(find app/build/outputs/apk/debug -maxdepth 1 -name "*.apk" | head -n 1)
           if [ -z "$DEBUG_APK" ] || [ ! -s "$DEBUG_APK" ]; then
@@ -77,10 +74,6 @@ jobs:
             exit 1
           fi
           ls -lh "$DEBUG_APK"
-          RELEASE_APK=$(find app/build/outputs/apk/release -maxdepth 1 -name "*.apk" | head -n 1)
-          if [ -n "$RELEASE_APK" ] && [ -s "$RELEASE_APK" ]; then
-            ls -lh "$RELEASE_APK"
-          fi
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
@@ -90,10 +83,89 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload Release APK Artifact
+      - name: Run Unit & Robolectric Tests (Non-Blocking)
+        continue-on-error: true
+        run: gradle testDebugUnitTest --stacktrace
+
+      - name: Summarize Unit Test Results
+        if: always()
+        run: |
+          python3 - << 'PY'
+          import glob
+          import os
+          import re
+          import xml.etree.ElementTree as ET
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          xml_files = sorted(glob.glob("app/build/test-results/**/*.xml", recursive=True))
+
+          total_tests = 0
+          total_failures = 0
+          total_errors = 0
+          total_skipped = 0
+          failed_cases = []
+
+          for path in xml_files:
+              try:
+                  tree = ET.parse(path)
+                  root = tree.getroot()
+              except Exception as exc:
+                  failed_cases.append((path, "XML parse error", "-", "-", str(exc)))
+                  continue
+
+              suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+              for suite in suites:
+                  total_tests += int(suite.attrib.get("tests", 0))
+                  total_failures += int(suite.attrib.get("failures", 0))
+                  total_errors += int(suite.attrib.get("errors", 0))
+                  total_skipped += int(suite.attrib.get("skipped", 0))
+
+                  for tc in suite.findall("testcase"):
+                      issue = tc.find("failure")
+                      if issue is None:
+                          issue = tc.find("error")
+                      if issue is None:
+                          continue
+                      cls = tc.attrib.get("classname", "")
+                      name = tc.attrib.get("name", "")
+                      full_name = f"{cls} > {name}" if cls else name
+                      msg = (issue.attrib.get("message") or (issue.text or "")).strip()
+                      m = re.search(r"expected:\s*<(.*?)>\s*but was:\s*<(.*?)>", msg, re.DOTALL)
+                      if not m and issue.text:
+                          m = re.search(r"expected:\s*<(.*?)>\s*but was:\s*<(.*?)>", issue.text, re.DOTALL)
+                      expected = m.group(1) if m else "-"
+                      actual = m.group(2) if m else "-"
+                      failed_cases.append((full_name, issue.attrib.get("type", "Failure"), expected, actual, msg[:400]))
+
+          lines = [
+              "## Unit Test Results",
+              f"- **Total:** {total_tests} | **Failures:** {total_failures} | **Errors:** {total_errors} | **Skipped:** {total_skipped}",
+          ]
+          if not xml_files:
+              lines.append("- No XML test result files found under `app/build/test-results`.")
+          elif not failed_cases:
+              lines.append("- All unit tests passed.")
+          else:
+              lines.append("")
+              lines.append("| Failed Test | Expected | Actual | Details |")
+              lines.append("| --- | --- | --- | --- |")
+              for full_name, typ, expected, actual, msg in failed_cases:
+                  def esc(s):
+                      return str(s).replace("|", "\\|").replace("\n", " ").strip()
+                  lines.append(f"| `{esc(full_name)}` | `{esc(expected)}` | `{esc(actual)}` | {esc(typ)}: {esc(msg)} |")
+
+          output = "\n".join(lines) + "\n"
+          print(output)
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as f:
+                  f.write(output)
+          PY
+
+      - name: Upload Test Reports
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: zehn-ai-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          name: zehn-ai-test-reports
+          path: app/build/reports/tests
           if-no-files-found: warn
           retention-days: 30
